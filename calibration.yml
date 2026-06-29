@@ -1,0 +1,7 @@
+# Persistent calibration state -- MANAGED BY CODE, do not hand-edit during a run.
+# Updated whenever you call result.accept() on a step. Loaded at session start
+# and merged over the hardware.yml `var` defaults so calibrated numbers survive
+# kernel restarts. Seed values below are the last-known-good points from the
+# 2026-06-28 notebook; they are overwritten as you re-accept fits.
+r_freq: 6584.5
+q_freq: 5022.0

@@ -1,0 +1,56 @@
+completed: '2026-06-28 16:50:09'
+created: '2026-06-28 16:48:50'
+dependent:
+- - Amplitude
+  - dB
+- - Phase
+  - rad
+- - I
+  - ''
+- - Q
+  - ''
+independent:
+- - Readout Pulse Frequency
+  - MHz
+parameters:
+  config:
+    0_g: 1
+    0_p: 0
+    0_type: pulse
+    1_t: 0
+    1_type: trigger
+    2_t: 1
+    2_type: delay_auto
+    hard_avg: 100
+    p0_freq: 6610.0
+    p0_gain: 0.31622776601683794
+    p0_length: 2
+    p0_mixer: 6500
+    p0_mode: periodic
+    p0_power: -10
+    r0_length: 213
+    r1_length: 2
+    r1_p: 0
+    r1_phase: 0
+    rep: 0
+  quick_experiment: ResonatorSpectroscopy
+  quick_version: 0.7.0
+  var:
+    q: 8
+    q_delta: -180
+    q_freq: 5000
+    q_gain: 1
+    q_gain_2: 0.5
+    q_length: 2
+    q_length_2: null
+    r: 1
+    r_freq: 6610.0
+    r_length: 2
+    r_offset: 0
+    r_phase: 0
+    r_power: -10
+    r_relax: 1
+    r_reset: 0
+    r_threshold: 0
+    rr: 1
+title: (ResonatorSpectroscopy)VNA-6620-Bias-0.2V

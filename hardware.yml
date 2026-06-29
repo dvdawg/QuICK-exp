@@ -1,0 +1,42 @@
+# Static hardware configuration -- edit by hand.
+# Loaded once at session start by labreadout.config; applies RF-board + bias
+# setup to the QICK board and seeds the base `var` dict. Replaces the
+# copy-pasted setup blocks that used to live in the notebook cells.
+
+ip: 192.168.1.123
+data_path: "Z:/David/Data/2026-06-28_MET_ver191/"
+
+# Channel map (matches the notebook's v['q'] / v['r'] / v['rr']).
+channels:
+  q: 8     # qubit-drive DAC
+  r: 10    # readout DAC
+  rr: 1    # readout ADC
+
+# Per-channel RF-board setup. Mirrors soc.rfb_set_gen_rf / rfb_set_gen_filter /
+# rfb_set_ro_rf. atten values are 0-30 dB.
+rf_board:
+  gen:
+    - {ch: 10, atten1: 10, atten2: 10, filter: {type: bypass, fc: 0}}   # readout
+    - {ch: 8,  atten1: 0,  atten2: 0,  filter: {type: bypass, fc: 0}}   # qubit
+  ro:
+    - {ch: 0, atten1: 0, atten2: 0}
+
+# DC flux bias applied at startup.
+bias:
+  channel: 0
+  default: -0.2
+
+# Base `var` defaults. Per-call experiment overrides and the calibration state
+# both take precedence over these at run time.
+var:
+  r_freq: 6584.5
+  r_power: -10
+  r_length: 20
+  r_offset: 0.5
+  r_relax: 20
+  r_phase: 0
+  r_threshold: 0
+  q_freq: 5000.0
+  q_gain: 0.2
+  q_length: 10
+  q_delta: -180

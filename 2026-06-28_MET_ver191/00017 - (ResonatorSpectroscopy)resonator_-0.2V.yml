@@ -1,0 +1,55 @@
+completed: '2026-06-28 17:35:44'
+created: '2026-06-28 17:34:11'
+dependent:
+- - Amplitude
+  - dB
+- - Phase
+  - rad
+- - I
+  - ''
+- - Q
+  - ''
+independent:
+- - Readout Pulse Frequency
+  - MHz
+parameters:
+  config:
+    0_g: 10
+    0_p: 0
+    0_type: pulse
+    1_t: 0
+    1_type: trigger
+    2_t: 10
+    2_type: delay_auto
+    hard_avg: 100
+    p0_freq: 6590.0
+    p0_gain: 0.1
+    p0_length: 2
+    p0_mixer: 6500
+    p0_mode: periodic
+    p0_power: -20
+    r1_length: 213
+    r1_p: 0
+    r1_phase: 0
+    rep: 0
+  quick_experiment: ResonatorSpectroscopy
+  quick_version: 0.7.0
+  var:
+    q: 8
+    q_delta: -180
+    q_freq: 5000
+    q_gain: 0.4
+    q_gain_2: 0.5
+    q_length: 20
+    q_length_2: null
+    r: 10
+    r_freq: 6590.0
+    r_length: 2
+    r_offset: 0
+    r_phase: 0
+    r_power: -20
+    r_relax: 10
+    r_reset: 0
+    r_threshold: 0
+    rr: 1
+title: (ResonatorSpectroscopy)resonator_-0.2V
