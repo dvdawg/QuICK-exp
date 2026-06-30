@@ -6,6 +6,8 @@ A thin, testable layer over the ``quick`` framework that adds:
 - ``state``    : persistent calibration state across kernel restarts
 - ``fitting``  : resonator / qubit / Rabi / T1 / T2 / IQ-threshold fits
 - ``adaptive`` : coarse-to-fine sweep-window logic
+- ``ports``    : logical<->physical DAC/ADC port mapping + sanity checks
+- ``diagnostics`` : advisory health report (SNR/noise, over-range, sanity, recs)
 - ``results``  : fit sidecars written *next to* the unchanged raw CSV
 - ``steps``    : the fit-and-suggest Session that drives the hardware
 
@@ -18,13 +20,26 @@ Typical lab use::
     res.accept()   # commit the fitted r_freq to calibration.yml
 """
 
-from . import adaptive, config, fitting, results, state, steps
+from . import (
+    adaptive,
+    config,
+    diagnostics,
+    fitting,
+    loopback,
+    ports,
+    results,
+    state,
+    steps,
+)
 from .steps import Session, StepResult
 
 __all__ = [
     "adaptive",
     "config",
+    "diagnostics",
     "fitting",
+    "loopback",
+    "ports",
     "results",
     "state",
     "steps",

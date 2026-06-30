@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing / type checking
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Generated fit sidecars (written next to raw CSVs by labreadout.results)
+*.fit.yml
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editors / local tooling
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.claude/settings.local.json
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+# Legacy exploratory notebooks (replaced by driver.ipynb + labreadout/)
+2026-06-24 QICK2*.ipynb
+QICK-baseline.ipynb
+*backup*
+* - Copy.ipynb
+
+actual_labfiles/
+docs/
+tests/data/

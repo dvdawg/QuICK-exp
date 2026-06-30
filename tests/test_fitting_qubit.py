@@ -4,9 +4,7 @@ import pytest
 
 from labreadout import fitting
 
-DATA_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "2026-06-28_MET_ver191"
-)
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 
 def _synthetic_qubit(f0, linewidth, sign=+1.0, fspan=600.0, npts=400, seed=1):

@@ -4,22 +4,35 @@
 # copy-pasted setup blocks that used to live in the notebook cells.
 
 ip: 192.168.1.123
-data_path: "Z:/David/Data/2026-06-28_MET_ver191/"
+data_path: "Z:/David/Data/2026-06-29_MET_ver191/"   # set per session
 
-# Channel map (matches the notebook's v['q'] / v['r'] / v['rr']).
+# Channel map: logical `quick` index for v['q'] / v['r'] / v['rr'].
+# NOTE: the logical index is NOT the physical QICK-box port number. The
+# `# DAC n` / `# ADC n` annotations below record the physical port each logical
+# index resolves to (verify with `python diagnose_ports.py` or sess.check_ports()).
+#
+# To make the port unambiguous and *verified*, switch a channel to the long form
+# that declares the expected physical port -- Session.connect() then refuses to
+# start if it resolves elsewhere (catches "is r=1 really DAC 10?"):
+#     r:  {gen: 1, dac_port: 10}
+#     rr: {ro: 1,  adc_port: 4}
+# Fill these in once you've confirmed the wiring with diagnose_ports.py.
 channels:
-  q: 8     # qubit-drive DAC
-  r: 10    # readout DAC
-  rr: 1    # readout ADC
+  q: 8     # qubit-drive  -> DAC 8
+  r: 1     # readout drive -> DAC 10
+  rr: 1    # readout ADC   -> ADC 4
 
-# Per-channel RF-board setup. Mirrors soc.rfb_set_gen_rf / rfb_set_gen_filter /
-# rfb_set_ro_rf. atten values are 0-30 dB.
+# Per-channel RF-board setup. Generator channels have TWO attenuators
+# (atten1/atten2, 0-30 dB); a readout channel has ONE (`atten`). An optional
+# `filter` block maps to rfb_set_gen_filter / rfb_set_ro_filter.
 rf_board:
   gen:
-    - {ch: 10, atten1: 10, atten2: 10, filter: {type: bypass, fc: 0}}   # readout
-    - {ch: 8,  atten1: 0,  atten2: 0,  filter: {type: bypass, fc: 0}}   # qubit
+    - {ch: 10, atten1: 0, atten2: 0, filter: {type: bypass, fc: 0}}   # readout
+    - {ch: 8,  atten1: 0, atten2: 0, filter: {type: bypass, fc: 0}}   # qubit
   ro:
-    - {ch: 0, atten1: 0, atten2: 0}
+    # One attenuator only. Add `filter: {type: bandpass, fc: <MHz>, bw: <MHz>}`
+    # to band-limit the readout input around the resonator if needed.
+    - {ch: 0, atten: 0}
 
 # DC flux bias applied at startup.
 bias:
@@ -29,10 +42,10 @@ bias:
 # Base `var` defaults. Per-call experiment overrides and the calibration state
 # both take precedence over these at run time.
 var:
-  r_freq: 6584.5
+  r_freq: 6500     # placeholder seed; resonator_spectroscopy finds + commits the real value
   r_power: -10
   r_length: 20
-  r_offset: 0.5
+  r_offset: 0.5    # readout-window delay; loopback_calibrate re-finds this from 0
   r_relax: 20
   r_phase: 0
   r_threshold: 0
@@ -40,3 +53,23 @@ var:
   q_gain: 0.2
   q_length: 10
   q_delta: -180
+
+# Known-value bounds used by labreadout.diagnostics to sanity-check results.
+# These are advisory: a fit outside the range is flagged, not blocked. Set them
+# from what you know (VNA, prior runs, datasheet) -- leave a key out to skip it.
+expected:
+  r_freq: [6400, 7000]   # readout resonator band (MHz)
+  q_freq: [4500, 5500]   # qubit band (MHz)
+  # ADC full-scale count. loopback_calibrate uses it to stay below over-range and
+  # diagnostics uses it to flag railing. VERIFY on your setup: it is the count at
+  # which the ADC interrupt trips (~1000 was comfortably safe on 2026-06-29).
+  adc_fullscale_counts: 2000
+
+# Adjustable knob ranges (documentation + sanity bounds). The driver recommends
+# starting values from each cell's result; you can always override per call, and
+# these ranges say what is physically sensible.
+limits:
+  r_power: [-60, 0]      # readout digital power (dB)
+  q_gain: [0.0, 1.0]     # qubit drive gain (fraction of full scale)
+  r_length: [0.1, 100]   # readout pulse / window length (us)
+  q_length: [0.0, 100]   # qubit pulse length (us)
