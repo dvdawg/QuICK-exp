@@ -1,0 +1,166 @@
+schema_version: 3
+
+site:
+  lab: QDG
+  timezone: America/Los_Angeles
+  operator: null
+
+device:
+  name: MET_v191
+  chip: MET
+  package: v191
+  cooldown: "2026-07-21"
+  qubits: [q3]
+  resonators: [r3]
+
+storage:
+  quick_native_output: true
+  quick_native_root: ./data
+
+qick:
+  host: 192.168.1.17
+  pyro_port: 8888
+  proxy_name: qick
+  board_model: null
+  board_serial: null
+  qick_version: 0.7.2
+  firmware: null
+  bitfile: MET_v191
+  bitfile_sha256: null
+  reference_clock_mhz: null
+  reset_generators_on_connect: true
+  clear_interrupts_on_connect: true
+  reset_policy: notebook_compatible
+  show_progress: true
+
+# Verified from the soccfg printed by 2026-07-21 MET v191.ipynb.
+# Logical indices are Quick/QICK indices, not physical connector numbers.
+channels:
+  r:
+    gen: 0
+    physical_port: DAC0
+    generator_type: axis_signal_gen_v6
+    nyquist_zone: 1
+  rr:
+    ro: 0
+    physical_port: ADC4
+    readout_type: axis_dyn_readout_v1
+    matched_generator: r
+  q:
+    gen: 1
+    physical_port: DAC1
+    generator_type: axis_signal_gen_v6
+    nyquist_zone: 1
+  z:
+    gen: 15
+    physical_port: DAC15
+    generator_type: axis_sg_int4_v2
+    coupling: dc
+
+# Direct DAC0/DAC1/ADC4 operation in the MET notebook did not require RF-board
+# programming. Keep this disabled until settings are deliberately reviewed.
+rf_board:
+  apply_on_connect: false
+  generators:
+    r:
+      enabled: false
+      channel: 0
+      attenuator_1_db: 0.0
+      attenuator_2_db: 0.0
+      filter: {type: bypass, center_ghz: 0.0, bandwidth_ghz: 1.0}
+    q:
+      enabled: false
+      channel: 1
+      attenuator_1_db: 0.0
+      attenuator_2_db: 0.0
+      filter: {type: bypass, center_ghz: 0.0, bandwidth_ghz: 1.0}
+  readouts:
+    rr:
+      enabled: false
+      channel: 0
+      attenuation_db: 0.0
+      filter: {type: bypass, center_ghz: 0.0, bandwidth_ghz: 1.0}
+  biases: {}
+
+external_instruments:
+  flux_supply:
+    driver: inject-at-runtime
+    resource: null
+    owns_output: false
+
+flux_lines:
+  z_rf:
+    backend: rf_dac
+    channel: z
+    unit: dac_gain
+    park: 0.0
+    minimum: -0.8
+    maximum: 0.8
+    hold_pulse_us: 0.2
+    program_settle_us: 5.0
+    dummy_readout_length_us: 2.0
+    dummy_relax_us: 2.0
+    settle_seconds: 0.0
+    coupling: dc
+    refresh_policy: before_each_outer_row
+    reset_policy: reapply_after_generator_reset
+    command_verification: command_only
+  z_dc:
+    backend: external_dc
+    instrument: flux_supply
+    unit: V
+    park: 0.0
+    minimum: -1.0
+    maximum: 1.0
+    max_step: 0.02
+    step_delay: 0.1
+    settle_seconds: 0.2
+    readback_tolerance: 0.0001
+    owns_output: false
+
+# Working values transcribed from the compact fixed-Z section of the notebook.
+# They are starting points, not universal calibration for every Z bias.
+defaults:
+  r_freq: 6883.11
+  r_power: -35.0
+  r_length: 2.0
+  r_offset: 0.495
+  r_phase: 0.0
+  r_relax: 20.0
+  r_reset: 0
+  r_threshold: 0.0
+  q_freq: 5606.5
+  q_gain: 0.4
+  q_length: 0.115
+  q_delta: -180.0
+  q_gain_2: 0.2
+  q_length_2: 0.115
+  z_gain: 0.0
+  hard_avg: 1000
+  soft_avg: 1
+  rep: 1
+
+limits:
+  r_freq: [5000.0, 9000.0]
+  q_freq: [2000.0, 8000.0]
+  r_power: [-60.0, 0.0]
+  q_gain: [-1.0, 1.0]
+  q_gain_2: [-1.0, 1.0]
+  z_gain: [-0.8, 0.8]
+  r_length: [0.01, 1000.0]
+  q_length: [0.001, 1000.0]
+  q_length_2: [0.001, 1000.0]
+  hard_avg: [1, 100000]
+  soft_avg: [1, 100]
+  rep: [0, 100000]
+  maximum_retry_attempts: [1, 5]
+
+safety:
+  require_port_check_before_live_run: true
+  require_reviewed_flux_controller: true
+  park_flux_on_exit: true
+
+expected:
+  r_freq_mhz: [6800.0, 6950.0]
+  q_freq_mhz: [3500.0, 6000.0]
+  adc_fullscale_counts: null

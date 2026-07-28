@@ -1,0 +1,269 @@
+schema_version: 3
+
+# Presets hold reusable defaults. The numbered files in experiments/ expose the
+# day-to-day knobs and can override any of these values with the IDE Run button.
+presets:
+  loopback:
+    experiment: loopback
+    parameters:
+      r_freq: 5500.0
+      r_power: 0.0
+      r_length: 10.0
+      r_offset: 0.495
+      soft_avg: 100
+    run:
+      dB: false
+      retry: {max_attempts: 1}
+    analysis:
+      model: pulse_edge_threshold
+
+  resonator_coarse:
+    experiment: resonator_spectroscopy
+    parameters:
+      r_freq: {center: 6884.0, span: 100.0, points: 501, unit: MHz}
+      r_power: -35.0
+      r_length: 2.0
+      hard_avg: 1000
+      soft_avg: 1
+    run:
+      dB: true
+      retry: {max_attempts: 3}
+    analysis:
+      model: signed_lorentzian_with_slope
+    acceptance:
+      r2_min: 0.7
+
+  resonator_fine:
+    experiment: resonator_spectroscopy
+    parameters:
+      r_freq: {center_from: defaults.r_freq, span: 10.0, points: 101, unit: MHz}
+      r_power: -35.0
+      r_length: 2.0
+      hard_avg: 3000
+      soft_avg: 1
+    run:
+      dB: true
+      retry: {max_attempts: 3}
+    analysis:
+      model: signed_lorentzian_with_slope
+    acceptance:
+      r2_min: 0.8
+
+  resonator_power:
+    experiment: resonator_spectroscopy
+    parameters:
+      r_power: {start: -40.0, stop: -5.0, points: 8, unit: dB}
+      r_freq: {center_from: defaults.r_freq, span: 30.0, points: 121, unit: MHz}
+      r_length: 50.0
+      hard_avg: 2000
+      soft_avg: 1
+    run:
+      dB: true
+      retry: {max_attempts: 3}
+    analysis:
+      note: native Quick rectangular r_freq-by-r_power grid
+
+  qubit_coarse:
+    experiment: qubit_spectroscopy
+    parameters:
+      q_freq: {center: 5000.0, span: 2000.0, points: 2001, unit: MHz}
+      q_gain: 0.3
+      q_length: 10.0
+      r_power: -30.0
+      r_length: 2.0
+      hard_avg: 5000
+      soft_avg: 3
+    run:
+      dB: false
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      model: signed_lorentzian_with_slope
+    acceptance:
+      r2_min: 0.6
+
+  qubit_fine:
+    experiment: qubit_spectroscopy
+    parameters:
+      q_freq: {center_from: defaults.q_freq, span: 20.0, points: 201, unit: MHz}
+      q_gain: 0.3
+      q_length: 10.0
+      hard_avg: 5000
+      soft_avg: 3
+    run:
+      dB: false
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      model: signed_lorentzian_with_slope
+    acceptance:
+      r2_min: 0.7
+
+  rabi_chevron_duration:
+    experiment: rabi_chevron
+    parameters:
+      q_freq: {center_from: defaults.q_freq, span: 20.0, points: 81, unit: MHz}
+      q_gain: 0.4
+      q_length: {start: 0.02, stop: 1.0, points: 50, unit: us}
+      hard_avg: 1000
+      soft_avg: 1
+    run:
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      note: native Quick q_freq-by-q_length grid
+
+  rabi_chevron_amplitude:
+    experiment: rabi_chevron
+    parameters:
+      q_freq: {center_from: defaults.q_freq, span: 20.0, points: 81, unit: MHz}
+      q_gain: {start: 0.02, stop: 0.8, points: 80, unit: a.u.}
+      q_length: 0.115
+      hard_avg: 1000
+      soft_avg: 1
+    run:
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      note: native Quick q_freq-by-q_gain grid
+
+  rabi_length:
+    experiment: rabi
+    parameters:
+      q_gain: 0.4
+      q_length: {start: 0.02, stop: 2.0, points: 100, unit: us}
+      hard_avg: 500
+      soft_avg: 1
+    run:
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      model: decaying_rabi
+    acceptance:
+      r2_min: 0.7
+
+  rabi_amplitude:
+    experiment: rabi
+    parameters:
+      q_gain: {start: 0.0, stop: 0.8, points: 161, unit: a.u.}
+      q_length: 0.115
+      hard_avg: 1000
+      soft_avg: 1
+    run:
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      model: decaying_rabi
+    acceptance:
+      r2_min: 0.7
+
+  iq_blobs:
+    experiment: iq_blobs
+    parameters:
+      shots: 10000
+    run:
+      retry: {max_attempts: 2}
+    analysis:
+      model: centroid_axis_threshold
+    acceptance:
+      fidelity_min: 0.8
+
+  dispersive:
+    experiment: dispersive_spectroscopy
+    parameters:
+      r_freq: {center: 6883.36, span: 20.0, points: 1001, unit: MHz}
+      r_power: -35.0
+      r_length: 1.0
+      q_freq: 5603.91
+      q_gain: 0.4
+      q_length: 0.115
+      hard_avg: 5000
+      soft_avg: 10
+    run:
+      dB: true
+      retry: {max_attempts: 3}
+    analysis:
+      model: maximum_readout_contrast_candidate
+
+  t1:
+    experiment: t1
+    parameters:
+      delay: {start: 0.0, stop: 29.9, points: 300, unit: us}
+      r_relax: 60.0
+      hard_avg: 10000
+      soft_avg: 5
+      rep: 1
+    run:
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      model: bounded_exponential
+    acceptance:
+      r2_min: 0.7
+
+  ramsey_chevron:
+    experiment: ramsey_chevron
+    parameters:
+      q_freq: {center_from: defaults.q_freq, span: 10.0, points: 41, unit: MHz}
+      delay: {start: 0.0, stop: 5.0, points: 251, unit: us}
+      fringe_frequency_mhz: 0.0
+      hard_avg: 1000
+      soft_avg: 1
+      rep: 1
+    run:
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      note: native Quick q_freq-by-time grid
+
+  ramsey:
+    experiment: ramsey
+    parameters:
+      delay: {start: 0.0, stop: 4.99, points: 500, unit: us}
+      fringe_frequency_mhz: 5.0
+      q_gain: 0.4
+      q_gain_2: 0.2
+      q_length: 0.115
+      q_length_2: 0.115
+      hard_avg: 10000
+      soft_avg: 5
+      rep: 1
+    run:
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      model: decaying_ramsey
+    acceptance:
+      r2_min: 0.6
+
+  echo:
+    experiment: echo
+    parameters:
+      delay: {start: 0.0, stop: 49.0, points: 50, unit: us}
+      pulse_count: 0
+      fringe_frequency_mhz: 0.0
+      hard_avg: 1000
+      soft_avg: 1
+      rep: 1
+    run:
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      model: bounded_exponential
+    acceptance:
+      r2_min: 0.6
+
+  cpmg_4:
+    experiment: echo
+    parameters:
+      delay: {start: 0.0, stop: 100.0, points: 101, unit: us}
+      pulse_count: 3
+      fringe_frequency_mhz: 0.0
+      hard_avg: 1000
+      soft_avg: 1
+      rep: 1
+    run:
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      model: bounded_exponential

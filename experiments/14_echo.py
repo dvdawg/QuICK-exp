@@ -1,0 +1,53 @@
+"""Hahn Echo / fixed-cycle CPMG measurement."""
+
+from pathlib import Path
+import sys
+import numpy as np
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from quickexp_v3.ide import run_experiment
+from quickexp_v3.naming import number_tag, z_tag
+
+
+# ============================ EDIT THESE ====================================
+LIVE_HARDWARE = True
+Z_GAIN = 0.0
+READOUT_FREQUENCY_MHZ = 6883.11
+Q_FREQUENCY_MHZ = 5606.5
+DELAY_US = np.arange(0.0, 50.0, 1.0)
+# Quick calls this "extra cycles"; 0 is the notebook's Hahn-Echo setting.
+EXTRA_CYCLES = 0
+FRINGE_FREQUENCY_MHZ = 0.0
+HARD_AVG = 1000
+SOFT_AVG = 1
+SHOW_PLOT = True
+# ============================================================================
+
+
+def main():
+    return run_experiment(
+        PROJECT_ROOT,
+        experiment="echo",
+        preset="echo",
+        title=f"{z_tag(Z_GAIN)}_T2Echo_q{number_tag(Q_FREQUENCY_MHZ)}",
+        live_hardware=LIVE_HARDWARE,
+        fixed_z_gain=Z_GAIN,
+        overrides={
+            "r_freq": READOUT_FREQUENCY_MHZ,
+            "q_freq": Q_FREQUENCY_MHZ,
+            "delay": DELAY_US,
+            "pulse_count": EXTRA_CYCLES,
+            "fringe_frequency_mhz": FRINGE_FREQUENCY_MHZ,
+            "hard_avg": HARD_AVG,
+            "soft_avg": SOFT_AVG,
+        },
+        show_plot=SHOW_PLOT,
+    )
+
+
+if __name__ == "__main__":
+    RESULT = main()
+

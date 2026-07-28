@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quickexp-v3"
+version = "0.5.0"
+description = "Run-button experiment modules using Quick native CSV/YML output"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy>=1.23",
+  "scipy>=1.9",
+  "matplotlib>=3.6",
+  "PyYAML>=6",
+  "tqdm>=4.64",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["quickexp_v3*"]
+
+[tool.setuptools.data-files]
+"share/quickexp_v3" = [
+  "hardware.example.yml",
+  "calibration.example.yml",
+  "presets.example.yml",
+  "ARCHITECTURE.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+

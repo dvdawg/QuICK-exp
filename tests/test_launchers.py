@@ -1,0 +1,45 @@
+from pathlib import Path
+import runpy
+
+
+ROOT = Path(__file__).resolve().parents[1]
+LAUNCHER_DIR = ROOT / "experiments"
+EXPECTED = [
+    "00_connect_and_ports.py",
+    "01_configure_experiment.py",
+    "02_raw_adc_loopback.py",
+    "05a_resonator_spectroscopy_vs_power.py",
+    "05b_resonator_spectroscopy_fixed_flux.py",
+    "05c_resonator_spectroscopy_vs_flux.py",
+    "06a_qubit_spectroscopy.py",
+    "06b_qubit_spectroscopy_vs_flux.py",
+    "06c_qubit_spectroscopy_vs_gain.py",
+    "07a_rabi_chevron_duration.py",
+    "07b_rabi_chevron_amplitude.py",
+    "08a_time_rabi.py",
+    "08b_power_rabi.py",
+    "09a_iq_blobs.py",
+    "10a_readout_frequency_optimization.py",
+    "11_t1.py",
+    "12_ramsey_chevron.py",
+    "13a_ramsey.py",
+    "14_echo.py",
+    "16_two_photon_spectroscopy.py",
+]
+
+
+def test_numbered_launcher_set_is_explicit_and_opx_ordered():
+    assert sorted(path.name for path in LAUNCHER_DIR.glob("*.py")) == EXPECTED
+
+
+def test_every_launcher_imports_offline_and_exposes_main():
+    for filename in EXPECTED:
+        namespace = runpy.run_path(
+            str(LAUNCHER_DIR / filename),
+            run_name=f"launcher_{filename[:-3]}",
+        )
+        if filename == "01_configure_experiment.py":
+            assert namespace["WRITE_CHANGES"] is False
+        else:
+            assert isinstance(namespace["LIVE_HARDWARE"], bool)
+        assert callable(namespace["main"])

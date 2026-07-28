@@ -1,6 +1,0 @@
-# Persistent calibration state -- MANAGED BY CODE, do not hand-edit during a run.
-# Updated whenever you call result.accept() on a step. Loaded at session start
-# and merged over the hardware.yml `var` defaults so calibrated numbers survive
-# kernel restarts. `r_freq` is intentionally absent here: it varies with bias and
-# is re-found + committed by resonator_spectroscopy each session.
-q_freq: 5022.0

@@ -1,87 +1,115 @@
-# labreadout
+# QuICK-exp v3
 
-An improved, testable QICK calibration & readout workflow layered over the
-`quick` framework. It replaces the hand-edited exploratory notebook with a small
-Python package plus a thin driver notebook.
+QuICK-exp v3 follows the numbered, one-file-per-measurement workflow of
+`opx-expcode` while retaining shared YAML configuration, port verification,
+calibration precedence, recovery, and held-flux safety from v2.
 
-## What it adds
+The workflow is IDE-first—there is no CLI. Open a numbered file in
+`experiments/`, edit its `EDIT THESE` block, and press Run.
 
-| Module | Responsibility |
-| --- | --- |
-| `config` | Load/validate `hardware.yml`, apply RF-board + bias setup to `soc`, build base `var` |
-| `state` | Persist fitted values in `calibration.yml` so they survive kernel restarts |
-| `fitting` | Resonator (complex notch), qubit peak, Rabi, T1, T2, IQ-threshold fits (params + uncertainties + GoF + plot) |
-| `adaptive` | Coarse→fine sweep-window logic |
-| `ports` | Resolve logical `q`/`r`/`rr` indices to physical DAC/ADC ports; flag direct/no-RF-card paths and declared-port mismatches |
-| `diagnostics` | Advisory health report: SNR/noise, ADC over-range, known-value sanity, a decision-tree verdict, and recommended knobs |
-| `loopback` | Loopback bring-up: find the readout-window delay (`r_offset`) and a safe drive level |
-| `results` | Write fit-result sidecars (`*.fit.yml`) **next to** the raw CSV |
-| `steps` | The fit-and-suggest `Session` that drives the hardware |
+## First use
 
-## Design principles
+1. Select `C:\Users\quant\anaconda3\envs\qcodes\python.exe` in the IDE.
+2. Open `experiments/01_configure_experiment.py`, edit shared values such as
+   `q_freq`, `r_freq`, the native data directory, connection, or logical
+   channels, and run it once with `WRITE_CHANGES = False`.
+3. When the preview is correct, set `WRITE_CHANGES = True`, run it, then set it
+   back to `False`.
+4. Run `00_connect_and_ports.py` to connect and verify the live `soccfg`
+   against the `r/rr/q/z` map.
+5. Run 02 to verify the raw ADC trace/readout trigger offset before proceeding
+   through spectroscopy and time-domain measurements.
 
-- **Raw CSVs are never touched.** `quick` writes them in the original format
-  (external plotting software depends on it); we only add `*.fit.yml` sidecars.
-- **Operator in the loop.** Each step runs, fits, plots, and *suggests* the next
-  scan. Nothing reaches `calibration.yml` until you call `.accept()`.
-- **Testable off the lab PC.** Only `steps.py` imports `quick`, lazily. Fitting,
-  adaptive, config, state, and results are unit-tested offline — fitters against
-  synthetic data with known ground truth and against the real result CSVs.
+Installation is optional because each launcher adds the project root to
+`sys.path`. To run tests:
 
-## Configuration
-
-- **`hardware.yml`** (static, edit by hand): board IP, data path, channel map
-  (`q`/`r`/`rr`), per-channel RF-board atten/filter, bias, base `var` defaults.
-- **`calibration.yml`** (code-managed): latest fitted values, merged over the
-  `var` defaults at session start and updated on `.accept()`.
-
-Precedence at run time: **per-call overrides > calibration state > config defaults**.
-
-## Usage
-
-```python
-import numpy as np
-import labreadout as lr
-
-sess = lr.Session.connect("hardware.yml", "calibration.yml")   # lab PC only
-
-res = sess.resonator_spectroscopy(r_freq=np.arange(6580, 6590, 0.01))
-res.plot()
-print(res.suggestion)          # e.g. "resonance at 6584.5 MHz (Q≈...) → fine scan ..."
-res.accept()                   # commit r_freq to calibration.yml
+```powershell
+C:\Users\quant\anaconda3\envs\qcodes\python.exe -m pytest -q
 ```
 
-See `driver.ipynb` for the full chain: bringup → resonator → dispersive/power →
-IQ readout → qubit spec → Rabi → T1 → T2.
+## Experimental order
 
-## Bring-up & diagnostics
+| File | Purpose |
+|---|---|
+| `00_connect_and_ports.py` | connect, print `soccfg`, verify routing |
+| `01_configure_experiment.py` | edit/validate/write common YAML settings |
+| `02_raw_adc_loopback.py` | raw decimated trace and readout-offset check |
+| `05a_resonator_spectroscopy_vs_power.py` | native power-by-frequency punchout |
+| `05b_resonator_spectroscopy_fixed_flux.py` | resonator scan at held Z |
+| `05c_resonator_spectroscopy_vs_flux.py` | resonator spectroscopy versus Z |
+| `06a_qubit_spectroscopy.py` | qubit spectroscopy |
+| `06b_qubit_spectroscopy_vs_flux.py` | qubit spectroscopy versus Z |
+| `06c_qubit_spectroscopy_vs_gain.py` | gain-by-frequency power spectroscopy |
+| `07a_rabi_chevron_duration.py` | frequency-by-duration Rabi chevron |
+| `07b_rabi_chevron_amplitude.py` | frequency-by-gain Rabi chevron |
+| `08a_time_rabi.py` | pulse-duration Rabi |
+| `08b_power_rabi.py` | pulse-gain Rabi |
+| `09a_iq_blobs.py` | ground/excited IQ clouds |
+| `10a_readout_frequency_optimization.py` | dispersive readout scan |
+| `11_t1.py` | energy relaxation |
+| `12_ramsey_chevron.py` | frequency-by-delay Ramsey chevron |
+| `13a_ramsey.py` | Ramsey dephasing |
+| `14_echo.py` | Hahn echo / fixed-cycle CPMG |
+| `16_two_photon_spectroscopy.py` | high-power two-photon search |
 
-- **Ports.** `Session.connect()` prints the logical→physical DAC/ADC map and
-  warns on direct/no-RF-card paths. Declare the expected port in `hardware.yml`
-  (`r: {gen: 1, dac_port: 10}`) and startup *refuses to run* on a mismatch.
-  Re-check any time with `sess.check_ports()`, or from the shell:
+The order and experiment variants follow `opx-expcode`; Quick classes, routing,
+and held-Z behavior were checked against `2026-07-21 MET v191.ipynb` and
+installed Quick 0.7.2.
 
-  ```bash
-  python diagnose_ports.py            # read-only map
-  python diagnose_ports.py --test 1 1 # safe low-power loopback on one pair
-  ```
+## Configuration and data
 
-- **Loopback calibration.** `sess.loopback_calibrate()` starts at `r_offset=0`,
-  measures the readout-window delay, then sweeps power to pick a level above
-  noise but below ADC over-range. `.accept()` commits `r_offset` + `r_power`.
+Settings resolve in this order:
 
-- **Result diagnosis (advisory).** Every step attaches a `.diagnosis` and prints
-  a short report — SNR/noise, over-range, and a known-value sanity check against
-  the `expected:` block in `hardware.yml` — with a likely cause and next action.
-  It never blocks; the `.accept()` invalid-fit guard is the only hard gate.
-
-- **Recommend-then-override.** Each result exposes `.recommendations` (e.g. Rabi →
-  `q_length`/`q_gain` for the π pulse). Stage them with `sess.apply(recs)`;
-  explicit per-call kwargs always win. `hardware.yml` documents knob ranges under
-  `limits:`.
-
-## Tests
-
-```bash
-python -m pytest        # runs offline; no hardware or `quick` required
+```text
+hardware defaults < accepted calibration < preset < launcher overrides
 ```
+
+- `hardware.yml` contains the connection, routing, bounds, shared defaults, and
+  native Quick output directory.
+- `calibration.yml` contains accepted values and provenance. The 01 editor
+  updates accepted `r_freq`, `q_freq`, and `r_offset` records with their matching
+  defaults so precedence stays intuitive.
+- `presets.yml` contains reusable experiment starting points.
+
+Live runs use only Quick's native numbered CSV/YML Saver. Ordinary runs get
+descriptive titles such as:
+
+```text
+00035 - (QubitSpectroscopy)QubitSpec_Zp0p1400_r6884p544.csv
+00065 - (T1)Zp0p0000_T1_q5606p500.csv
+```
+
+Held-Z maps are combined into one native pair, for example
+`ResVsZ_held_bias.csv` or `QubitSpecVsZ_fitted_readout.csv`. No new
+`runs/.../manifest.json` or `raw.npz` tree is created. The existing `runs`
+directory is retained as legacy acquired data.
+
+Quick progress is enabled by `qick.show_progress: true`; each native sweep shows
+the `quick.Sweep` bar with percentage, elapsed/estimated time, and iterations
+per second. Multi-Z scans also use a Quick progress bar for their outer rows.
+
+## MET live behavior
+
+The reviewed logical map is:
+
+```text
+r  = generator 0  -> DAC0  axis_signal_gen_v6
+q  = generator 1  -> DAC1  axis_signal_gen_v6
+rr = readout 0    -> ADC4  axis_dyn_readout_v1
+z  = generator 15 -> DAC15 axis_sg_int4_v2
+```
+
+At zero Z, fixed-Z scripts use the generator reset performed during connection
+and skip the auxiliary acquisition entirely. Nonzero fixed-Z scripts establish
+a minimal one-average `p9_mode: last` pulse on generator 15. The helper
+scalarizes every numeric sweep parameter before compiling this auxiliary
+program, so no 2D readout/qubit list can leak into Mercator. Every connection,
+acquisition, and close also stops/drains/flushes persistent QICK streamer state,
+so LoopBack or an aborted process cannot poison the next integrated sweep. On
+retry the runtime resets generators and reapplies held Z. On exit it parks Z at
+zero.
+
+RF-board programming stays disabled until attenuation/filter settings have
+been deliberately reviewed for the current wiring.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for implementation boundaries.
