@@ -1,13 +1,10 @@
 # QuICK-exp v3
 
-QuICK-exp v3 follows the numbered, one-file-per-measurement workflow of
-`opx-expcode` while retaining shared YAML configuration, port verification,
-calibration precedence, recovery, and held-flux safety from v2.
+QuICK-exp v3 is a numbered, one-file-per-measurement workflow for qubit measurement using a QICK board
+with shared YAML configuration, port verification,
+calibration precedence, recovery, and held-flux functionality.
 
-The workflow is IDE-first—there is no CLI. Open a numbered file in
-`experiments/`, edit its `EDIT THESE` block, and press Run.
-
-## First use
+## Usage and Startup
 
 1. Open `experiments/01_configure_experiment.py`, edit shared values such as
    `q_freq`, `r_freq`, the native data directory, connection, or logical
