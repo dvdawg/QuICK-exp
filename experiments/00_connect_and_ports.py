@@ -1,4 +1,4 @@
-"""Connect to MET v191 and verify Quick logical channels before experiments."""
+"""Connect to hardware and verify Quick logical channels before experiments."""
 
 from pathlib import Path
 import sys

@@ -7,7 +7,7 @@ import pytest
 from quickexp_v3.backend import QuickBackend
 from quickexp_v3.config import ConfigRepository
 from quickexp_v3.errors import ConfigError
-from quickexp_v3.lab import connect_quick
+from quickexp_v3.lab import configure_quick_progress, connect_quick
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,3 +84,17 @@ def test_recovery_follows_notebook_stop_drain_flush_reset_order():
         "clear_interrupts",
     ]
     assert details["warnings"] == []
+
+def test_terminal_progress_renderer_replaces_quick_notebook_widget():
+    helper = SimpleNamespace(tqdm=object())
+    quick = SimpleNamespace(helper=helper)
+
+    binding = configure_quick_progress(quick, "terminal")
+
+    assert binding == "tqdm.std.tqdm"
+    assert helper.tqdm.__module__ == "tqdm.std"
+
+
+def test_unknown_progress_renderer_is_rejected():
+    with pytest.raises(ConfigError, match="terminal, notebook, or auto"):
+        configure_quick_progress(SimpleNamespace(helper=SimpleNamespace()), "bad")

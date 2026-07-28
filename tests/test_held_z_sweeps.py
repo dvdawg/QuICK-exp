@@ -57,6 +57,8 @@ def test_held_z_scalarizes_every_native_2d_sweep(preset, overrides):
     parameters = config.resolve(preset, overrides=overrides).expanded_parameters()
     # Exercise a readout array too; this reproduces the original r_power crash.
     parameters["r_length"] = np.array([50.0, 10.0, 20.0])
+    parameters["z_length"] = 0.37
+    parameters["z_settle"] = 6.25
     expected_frequency = np.asarray(parameters["r_freq"]).ravel()
     expected_frequency = expected_frequency[expected_frequency.size // 2]
     expected_power = float(np.min(np.asarray(parameters["r_power"])))
@@ -84,6 +86,8 @@ def test_held_z_scalarizes_every_native_2d_sweep(preset, overrides):
     assert held["r_power"] == expected_power
     assert held["r_length"] == 2.0
     assert held["r_relax"] == 2.0
+    assert held["z_length"] == 0.37
+    assert held["z_settle"] == 6.25
     assert FakeBaseExperiment.captured_kwargs["hard_avg"] == 1
     assert FakeBaseExperiment.captured_kwargs["soft_avg"] == 1
     for key in ("hard_avg", "soft_avg", "rep"):

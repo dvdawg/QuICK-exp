@@ -76,8 +76,13 @@ def test_quick_backend_separates_sweeps_from_mercator_config():
     assert np.asarray(FakeRabi.captured_var["q_gain"]).size == 161
     assert FakeRabi.captured_kwargs["hard_avg"] == 1000
     assert FakeRabi.captured_kwargs["soft_avg"] == 1
-    assert FakeRabi.captured_kwargs["rep"] == 1
+    assert FakeRabi.captured_kwargs["rep"] == 1000
+    assert FakeRabi.captured_var["z"] == 15
+    assert FakeRabi.captured_var["z_gain"] == 0.0
+    assert FakeRabi.captured_var["z_length"] == 0.2
+    assert FakeRabi.captured_var["z_settle"] == 5.0
     assert FakeRabi.captured_run_arguments["silent"] is False
+    assert FakeRabi.captured_run_arguments["population"] is False
     assert result.metadata["native_files"] == []
 
 

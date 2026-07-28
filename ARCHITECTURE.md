@@ -32,6 +32,13 @@ installed Quick 0.7.2. Library modules are not runnable entry points.
   RF-board policy, and flux safety.
 - `calibration.yml` owns accepted values, valid domains, fit quality, and
   provenance.
+- `task_queue.py` runs existing numbered launchers sequentially without bypassing
+  their normal safety, persistence, or cleanup paths.
+- `rabi_fit.py` identifies native Time/Power Rabi axes from paired Quick YML,
+  fits rotated IQ, quality-gates the pi recommendation, and atomically versions
+  accepted `q_length`/`q_gain` defaults.
+- `resonator_flux.py` reproduces the notebook notch extraction/cosine fit,
+  quality-gates acceptance, and atomically versions the lookup calibration.
 - `presets.yml` owns reusable starting scans, averaging, retry, and analysis.
 - An adapter owns the Quick class, axis mapping, output columns, and analysis.
 - `runtime.py` owns exact retry, decode, analysis, and cleanup; it does not
@@ -56,12 +63,28 @@ keyword. V3 passes each declared axis as a constructor sweep. `hard_avg`,
 activates Quick's native `quick.Sweep` progress display. It also returns the
 exact Saver CSV/YML paths as acquisition metadata.
 
+Before held flux is established, `QuickBackend` validates uploaded Gaussian
+envelopes against the connected q generator's waveform-memory metadata. The
+sample calculation intentionally matches Quick 0.7.2's Mercator conversion,
+including cumulative Ramsey/Echo envelopes. Deterministic `ConfigError`
+failures bypass acquisition recovery and retry.
+
 Native Cartesian sweeps power the resonator punchout, qubit-gain scan, and
 Rabi/Ramsey chevrons. Flux remains an outer loop because generator 15 must be
 held and reapplied after recovery. Row acquisitions disable their individual
 Savers; one direct Quick `Saver` writes the assembled Z-by-inner-axis table,
 matching the historical `ResVsZ_held_bias` and
 `QubitSpecVsZ_fitted_readout` files.
+
+The numbered `08c` analysis launcher reads a one-dimensional native Rabi
+CSV/YML pair, infers `q_length` or `q_gain` from Quick metadata, and writes a
+history-preserving scalar calibration only through an explicit acceptance latch.
+
+The numbered `05d` analysis launcher reads the native `ResVsZ_held_bias` CSV,
+extracts one resonator notch per Z row, and fits the accepted cosine lookup.
+Later fixed-Z launchers evaluate that lookup once; `06b` evaluates it for each
+outer Z row. The calibration record carries its source, quality, uncertainty,
+and measured domain, and out-of-domain use fails before hardware acquisition.
 
 Before the auxiliary held-Z program is compiled, every numeric array in its
 variables is reduced to a safe scalar (frequency center; minimum

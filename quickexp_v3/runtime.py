@@ -8,7 +8,7 @@ from typing import Any, Mapping, Optional, Union
 
 from .config import ConfigRepository, ResolvedConfig
 from .data import AnalysisResult, ExperimentData
-from .errors import AcquisitionError, SafetyError
+from .errors import AcquisitionError, ConfigError, SafetyError
 from .experiments.base import Experiment, ExperimentPlan
 from .experiments.registry import get as get_experiment
 
@@ -60,6 +60,7 @@ class ExperimentRunner:
         preset: Union[str, Mapping[str, Any]],
         *,
         overrides: Optional[Mapping[str, Any]] = None,
+        run_options: Optional[Mapping[str, Any]] = None,
         title: Optional[str] = None,
     ) -> PlannedRun:
         experiment = get_experiment(experiment_name)
@@ -69,6 +70,33 @@ class ExperimentRunner:
             overrides=overrides,
         )
         plan = experiment.build(resolved)
+        if run_options:
+            allowed = {"silent", "dB", "population"}
+            unknown = set(run_options) - allowed
+            if unknown:
+                raise ConfigError(
+                    "unsupported run options: " + ", ".join(sorted(unknown))
+                )
+            merged_run_options = {
+                **dict(plan.run_options),
+                **dict(run_options),
+            }
+            signal_names = tuple(plan.signal_names)
+            signal_units = dict(plan.signal_units)
+            if "population" in run_options:
+                signal_names = tuple(
+                    name for name in signal_names if name != "population"
+                )
+                signal_units.pop("population", None)
+                if bool(merged_run_options["population"]):
+                    signal_names = ("population",) + signal_names
+                    signal_units["population"] = ""
+            plan = replace(
+                plan,
+                run_options=merged_run_options,
+                signal_names=signal_names,
+                signal_units=signal_units,
+            )
         if title:
             plan = replace(plan, title=str(title))
         return PlannedRun(experiment, resolved, plan)
@@ -79,6 +107,7 @@ class ExperimentRunner:
         preset: Union[str, Mapping[str, Any]],
         *,
         overrides: Optional[Mapping[str, Any]] = None,
+        run_options: Optional[Mapping[str, Any]] = None,
         title: Optional[str] = None,
         analyze: bool = True,
         close_backend: bool = True,
@@ -88,6 +117,7 @@ class ExperimentRunner:
             experiment_name,
             preset,
             overrides=overrides,
+            run_options=run_options,
             title=title,
         )
         connect = getattr(self.backend, "connect", None)
@@ -162,6 +192,8 @@ class ExperimentRunner:
             try:
                 return self.backend.acquire(planned.plan)
             except BaseException as error:
+                if isinstance(error, ConfigError):
+                    raise
                 last_error = error
                 if attempt >= max_attempts:
                     break

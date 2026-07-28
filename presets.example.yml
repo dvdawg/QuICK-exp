@@ -105,6 +105,11 @@ presets:
       q_freq: {center_from: defaults.q_freq, span: 20.0, points: 81, unit: MHz}
       q_gain: 0.4
       q_length: {start: 0.02, stop: 1.0, points: 50, unit: us}
+      cycle: 0
+      r_power: -30.0
+      r_length: 2.0
+      r_relax: 20.0
+      rep: 1000
       hard_avg: 1000
       soft_avg: 1
     run:
@@ -119,6 +124,11 @@ presets:
       q_freq: {center_from: defaults.q_freq, span: 20.0, points: 81, unit: MHz}
       q_gain: {start: 0.02, stop: 0.8, points: 80, unit: a.u.}
       q_length: 0.115
+      cycle: 0
+      r_power: -30.0
+      r_length: 2.0
+      r_relax: 20.0
+      rep: 1000
       hard_avg: 1000
       soft_avg: 1
     run:
@@ -131,7 +141,12 @@ presets:
     experiment: rabi
     parameters:
       q_gain: 0.4
-      q_length: {start: 0.02, stop: 2.0, points: 100, unit: us}
+      q_length: {start: 0.02, stop: 1.67, points: 34, unit: us}
+      cycle: 0
+      r_power: -30.0
+      r_length: 2.0
+      r_relax: 20.0
+      rep: 1000
       hard_avg: 500
       soft_avg: 1
     run:
@@ -147,6 +162,11 @@ presets:
     parameters:
       q_gain: {start: 0.0, stop: 0.8, points: 161, unit: a.u.}
       q_length: 0.115
+      cycle: 0
+      r_power: -30.0
+      r_length: 2.0
+      r_relax: 20.0
+      rep: 1000
       hard_avg: 1000
       soft_avg: 1
     run:

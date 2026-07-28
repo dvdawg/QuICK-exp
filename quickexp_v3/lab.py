@@ -52,6 +52,24 @@ steps:
   t: {r_relax}
 """
 
+def configure_quick_progress(quick_module: Any, mode: str = "terminal") -> str:
+    """Bind Quick's Sweep to a tqdm renderer suitable for the run surface."""
+    normalized = str(mode).strip().lower()
+    if normalized == "terminal":
+        from tqdm.std import tqdm as progress
+    elif normalized == "notebook":
+        from tqdm.notebook import tqdm as progress
+    elif normalized == "auto":
+        from tqdm.auto import tqdm as progress
+    else:
+        raise ConfigError(
+            "qick.progress_mode must be terminal, notebook, or auto"
+        )
+    helper = getattr(quick_module, "helper", None)
+    if helper is None:
+        return "unavailable (test/dummy Quick module)"
+    helper.tqdm = progress
+    return f"{progress.__module__}.{progress.__name__}"
 
 @dataclass
 class QuickConnection:
@@ -152,6 +170,12 @@ def connect_quick(
             f"but this interpreter has {actual_version}"
         )
     print(f"Using Quick {actual_version}.")
+    progress_binding = configure_quick_progress(
+        quick,
+        qick.get("progress_mode", "terminal"),
+    )
+    if bool(qick.get("show_progress", True)):
+        print(f"Quick progress renderer: {progress_binding}")
     host = str(qick["host"])
     port = int(qick.get("pyro_port", 8888))
     proxy_name = str(qick.get("proxy_name", "qick"))
@@ -318,13 +342,24 @@ def make_held_flux_controller(
             "rr": int(repository.hardware["channels"]["rr"]["ro"]),
             "q": int(repository.hardware["channels"]["q"]["gen"]),
             "z": int(repository.hardware["channels"]["z"]["gen"]),
-            "z_length": float(line.get("hold_pulse_us", 0.2)),
-            "z_settle": float(line.get("program_settle_us", 5.0)),
+            "z_length": float(
+                variables.get("z_length", line.get("hold_pulse_us", 0.2))
+            ),
+            "z_settle": float(
+                variables.get("z_settle", line.get("program_settle_us", 5.0))
+            ),
         }
     )
+    if not np.isfinite(variables["z_length"]) or variables["z_length"] <= 0:
+        raise ConfigError("z_length must be finite and greater than zero")
+    if not np.isfinite(variables["z_settle"]) or variables["z_settle"] < 0:
+        raise ConfigError("z_settle must be finite and non-negative")
     carrier_frequency = float(variables["r_freq"])
     print(
-        "Held-Z helper dummy readout: "
+        "Held-Z helper: "
+        f"length={variables['z_length']:.6f} us, "
+        f"program settle={variables['z_settle']:.6f} us; "
+        "dummy readout "
         f"{carrier_frequency:.6f} MHz, "
         f"{variables['r_power']:.3f} dB, "
         f"{variables['r_length']:.6f} us"

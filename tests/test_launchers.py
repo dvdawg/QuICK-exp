@@ -11,6 +11,7 @@ EXPECTED = [
     "05a_resonator_spectroscopy_vs_power.py",
     "05b_resonator_spectroscopy_fixed_flux.py",
     "05c_resonator_spectroscopy_vs_flux.py",
+    "05d_fit_resonator_vs_flux.py",
     "06a_qubit_spectroscopy.py",
     "06b_qubit_spectroscopy_vs_flux.py",
     "06c_qubit_spectroscopy_vs_gain.py",
@@ -18,6 +19,7 @@ EXPECTED = [
     "07b_rabi_chevron_amplitude.py",
     "08a_time_rabi.py",
     "08b_power_rabi.py",
+    "08c_fit_rabi.py",
     "09a_iq_blobs.py",
     "10a_readout_frequency_optimization.py",
     "11_t1.py",
@@ -25,6 +27,7 @@ EXPECTED = [
     "13a_ramsey.py",
     "14_echo.py",
     "16_two_photon_spectroscopy.py",
+    "90_measurement_queue.py",
 ]
 
 

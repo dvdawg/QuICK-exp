@@ -26,6 +26,7 @@ QUICK_BASE_VARIABLES = frozenset(
         "rr", "r", "q", "r_freq", "r_power", "r_length", "r_phase",
         "r_offset", "r_threshold", "r_relax", "r_reset", "q_freq",
         "q_length", "q_length_2", "q_delta", "q_gain", "q_gain_2",
+        "z", "z_gain", "z_length", "z_settle",
     }
 )
 QUICK_CLASS_VARIABLES = {
@@ -42,6 +43,102 @@ QUICK_CONFIG_OVERRIDES_BY_CLASS = {
     # leaves hard_avg/reps at one, matching the MET notebook.
     "LoopBack": ("soft_avg",),
 }
+
+# Quick 0.7.2 uploads these Gaussian pulse envelopes into the q-generator
+# waveform memory. T2Ramsey/T2Echo allocate one reset/pi envelope plus two
+# pi/2 envelopes, so their lengths are cumulative.
+QUICK_Q_ENVELOPE_TERMS = {
+    "Rabi": (("q_length", 1),),
+    "T1": (("q_length", 1),),
+    "IQScatter": (("q_length", 1),),
+    "DispersiveSpectroscopy": (("q_length", 1),),
+    "T2Ramsey": (("q_length", 1), ("q_length_2", 2)),
+    "T2Echo": (("q_length", 1), ("q_length_2", 2)),
+}
+
+
+def _maximum_envelope_samples(
+    value: Any,
+    *,
+    f_fabric: float,
+    samples_per_clock: int,
+    label: str,
+) -> int:
+    durations = np.asarray(value, dtype=float)
+    if durations.size == 0 or not np.all(np.isfinite(durations)):
+        raise ConfigError(f"{label} must contain finite pulse lengths")
+    if np.any(durations <= 0):
+        raise ConfigError(f"{label} pulse lengths must be positive")
+    # This intentionally matches quick.mercator.generate_waveform:
+    # int(length_us * f_fabric) * samps_per_clk.
+    fabric_clocks = np.asarray(
+        [int(float(length) * f_fabric) for length in durations.ravel()],
+        dtype=int,
+    )
+    return int(np.max(fabric_clocks) * samples_per_clock)
+
+
+def validate_quick_envelope_memory(plan: Any, soccfg: Any) -> Optional[dict]:
+    """Reject Quick Gaussian waveforms that cannot fit the q-generator RAM."""
+    terms = QUICK_Q_ENVELOPE_TERMS.get(plan.quick_class)
+    if terms is None:
+        return None
+    variables = dict(plan.variables)
+    try:
+        q_channel = int(variables["q"])
+        generator = soccfg["gens"][q_channel]
+        f_fabric = float(generator["f_fabric"])
+        samples_per_clock = int(generator["samps_per_clk"])
+        available_samples = int(generator["maxlen"])
+    except (KeyError, TypeError, ValueError, IndexError):
+        # Lightweight fake soccfg objects used by offline tests do not expose
+        # generator memory metadata. Live QICK soccfg always does.
+        return None
+
+    required_samples = 0
+    contributions = {}
+    primary_length = variables.get("q_length")
+    for name, multiplier in terms:
+        value = variables.get(name)
+        if name == "q_length_2" and (
+            value is None or np.all(np.asarray(value) == 0)
+        ):
+            value = primary_length
+        if value is None:
+            raise ConfigError(f"{plan.name} requires {name}")
+        samples = _maximum_envelope_samples(
+            value,
+            f_fabric=f_fabric,
+            samples_per_clock=samples_per_clock,
+            label=f"{plan.name}.{name}",
+        )
+        contributions[name] = {
+            "samples_per_envelope": samples,
+            "envelope_count": int(multiplier),
+        }
+        required_samples += int(multiplier) * samples
+
+    maximum_single_envelope_us = (
+        available_samples / (f_fabric * samples_per_clock)
+    )
+    details = {
+        "q_channel": q_channel,
+        "required_samples": required_samples,
+        "available_samples": available_samples,
+        "maximum_single_envelope_us": maximum_single_envelope_us,
+        "contributions": contributions,
+    }
+    if required_samples > available_samples:
+        largest_requested = float(np.max(np.asarray(primary_length, dtype=float)))
+        raise ConfigError(
+            f"{plan.name} Gaussian envelope request needs "
+            f"{required_samples} samples on q generator {q_channel}, but its "
+            f"waveform memory holds {available_samples}. Requested q_length "
+            f"reaches {largest_requested:.6f} us; one envelope is nominally "
+            f"limited to {maximum_single_envelope_us:.6f} us on this bitfile. "
+            "Shorten the pulse-length sweep before running."
+        )
+    return details
 
 
 def logical_channel_variables(hardware: Mapping[str, Any]) -> dict:
@@ -164,9 +261,14 @@ class QuickBackend:
             raise AcquisitionError("QuickBackend requires both soc and soccfg")
         self.connected = True
 
+    def validate(self, plan: Any) -> Optional[dict]:
+        """Validate hardware-dependent plan limits without acquiring."""
+        return validate_quick_envelope_memory(plan, self.soccfg)
+
     def acquire(self, plan: Any) -> BackendResult:
         if not self.connected:
             self.connect()
+        self.validate(plan)
         self.last_preflight = clean_qick_acquisition_state(self.soc)
         for warning in self.last_preflight["warnings"]:
             print(f"QICK readout preflight warning: {warning}")

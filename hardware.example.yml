@@ -32,6 +32,7 @@ qick:
   clear_interrupts_on_connect: true
   reset_policy: notebook_compatible
   show_progress: true
+  progress_mode: terminal
 
 # Verified from the soccfg printed by 2026-07-21 MET v191.ipynb.
 # Logical indices are Quick/QICK indices, not physical connector numbers.
@@ -136,6 +137,8 @@ defaults:
   q_gain_2: 0.2
   q_length_2: 0.115
   z_gain: 0.0
+  z_length: 0.2
+  z_settle: 5.0
   hard_avg: 1000
   soft_avg: 1
   rep: 1
@@ -147,6 +150,8 @@ limits:
   q_gain: [-1.0, 1.0]
   q_gain_2: [-1.0, 1.0]
   z_gain: [-0.8, 0.8]
+  z_length: [0.001, 1000.0]
+  z_settle: [0.0, 100000.0]
   r_length: [0.01, 1000.0]
   q_length: [0.001, 1000.0]
   q_length_2: [0.001, 1000.0]

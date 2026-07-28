@@ -1,6 +1,6 @@
-"""Edit the common lab settings here, then press the IDE Run button.
+"""Edit the common lab settings here, then run.
 
-Set ``WRITE_CHANGES = True`` only when the values below are ready.  The script
+Set ``WRITE_CHANGES = False`` only when the values below are ready.  The script
 validates the complete hardware/calibration/preset overlay before replacing any
 YAML file.  Accepted r_freq, q_freq, and r_offset calibration records are kept
 in sync because those records otherwise take precedence over hardware defaults.
@@ -30,6 +30,8 @@ WRITE_CHANGES = False
 DATA_OUTPUT_DIRECTORY = r"Z:\David\Data\2026-07-21_MET_ver191_qubit3"
 QUICK_NATIVE_OUTPUT = True
 SHOW_PROGRESS = True
+# terminal: IDE/PowerShell; notebook: Jupyter widget; auto: environment detection.
+PROGRESS_MODE = "terminal"
 
 DEVICE = {
     "name": "MET_v191",
@@ -67,11 +69,13 @@ DEFAULT_PARAMETERS = {
     "r_threshold": 0.0,
     "q_freq": 5606.5,
     "q_gain": 0.4,
-    "q_length": 0.115,
+    "q_length": 0.2,
     "q_delta": -180.0,
     "q_gain_2": 0.2,
     "q_length_2": 0.115,
     "z_gain": 0.0,
+    "z_length": 0.2,
+    "z_settle": 5.0,
     "hard_avg": 1000,
     "soft_avg": 1,
     "rep": 1,
@@ -164,6 +168,7 @@ def main():
     hardware["device"].update(deepcopy(DEVICE))
     hardware["qick"].update(deepcopy(QICK_CONNECTION))
     hardware["qick"]["show_progress"] = bool(SHOW_PROGRESS)
+    hardware["qick"]["progress_mode"] = str(PROGRESS_MODE)
     hardware["channels"]["r"]["gen"] = int(CHANNEL_INDICES["r"])
     hardware["channels"]["rr"]["ro"] = int(CHANNEL_INDICES["rr"])
     hardware["channels"]["q"]["gen"] = int(CHANNEL_INDICES["q"])
@@ -209,6 +214,7 @@ def main():
     print("Configuration preview validated.")
     print(f"  Native Quick data: {hardware['storage']['quick_native_root']}")
     print(f"  Quick progress: {hardware['qick']['show_progress']}")
+    print(f"  Quick progress mode: {hardware['qick']['progress_mode']}")
     print(
         "  Channels: "
         f"r={CHANNEL_INDICES['r']}, rr={CHANNEL_INDICES['rr']}, "

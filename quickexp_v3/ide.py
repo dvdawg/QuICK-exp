@@ -12,7 +12,9 @@ import numpy as np
 from .backend import SyntheticBackend
 from .config import ConfigRepository
 from .data import ExperimentData
+from .errors import ConfigError
 from .lab import connect_quick, make_held_flux_controller
+from .resonator_flux import frequency_from_calibration_record
 from .runtime import CompletedRun, ExperimentRunner
 from .util import to_builtin
 
@@ -181,12 +183,24 @@ def plot_data(data: ExperimentData, title: str):
     return fig
 
 
+def _print_envelope_preflight(details: Optional[Mapping[str, Any]]) -> None:
+    if not details:
+        return
+    print(
+        "Quick envelope preflight: "
+        f"{details['required_samples']}/{details['available_samples']} "
+        f"q-generator samples required; single-envelope nominal maximum "
+        f"{details['maximum_single_envelope_us']:.6f} us."
+    )
+
+
 def run_experiment(
     project_root: Path,
     *,
     experiment: str,
     preset: str,
     overrides: Optional[Mapping[str, Any]] = None,
+    run_options: Optional[Mapping[str, Any]] = None,
     title: Optional[str] = None,
     live_hardware: bool = False,
     fixed_z_gain: Optional[float] = None,
@@ -204,6 +218,26 @@ def run_experiment(
     if live_hardware:
         connection = connect_quick(repository)
         backend = connection.backend
+        try:
+            preflight_runner = ExperimentRunner(repository, backend)
+            preflight_plan = preflight_runner.plan(
+                experiment,
+                preset,
+                overrides=run_overrides,
+                run_options=run_options,
+                title=title,
+            )
+            validate = getattr(backend, "validate", None)
+            preflight_details = (
+                validate(preflight_plan.plan) if callable(validate) else None
+            )
+            _print_envelope_preflight(preflight_details)
+        except BaseException:
+            try:
+                backend.close()
+            except BaseException as cleanup_error:
+                print(f"Backend preflight cleanup warning: {cleanup_error}")
+            raise
         if fixed_z_gain is not None:
             requested_z = float(fixed_z_gain)
             line = repository.hardware.get("flux_lines", {}).get(flux_line, {})
@@ -260,6 +294,7 @@ def run_experiment(
         experiment,
         preset,
         overrides=run_overrides,
+        run_options=run_options,
         title=title,
         analyze=analyze,
     )
@@ -282,32 +317,47 @@ def run_experiment(
 def resonator_frequency_from_flux(
     repository: ConfigRepository,
     z_gain: Any,
-) -> np.ndarray:
+) -> Any:
     try:
         record = repository.calibration["records"]["lookups"][
             "resonator_vs_flux"
         ]
-        if record.get("status") != "accepted":
-            raise KeyError("lookup is not accepted")
-        parameters = record["value"]["parameters"]
-        f0 = float(parameters["center_frequency"])
-        amplitude = float(parameters["amplitude"])
-        period = float(parameters["period"])
-        peak = float(parameters["peak_bias"])
-    except (KeyError, TypeError, ValueError) as error:
+        return frequency_from_calibration_record(record, z_gain)
+    except (KeyError, TypeError, ValueError, ConfigError) as error:
         raise RuntimeError(
-            "calibration.yml has no accepted lookups.resonator_vs_flux cosine"
-        ) from error
-    values = np.asarray(z_gain, dtype=float)
-    domain = record.get("valid_domain", {}).get("z_gain")
-    if domain is not None:
-        minimum, maximum = map(float, domain)
-        if np.any(values < minimum) or np.any(values > maximum):
-            raise RuntimeError(
-                f"requested z_gain is outside accepted resonator-fit domain "
-                f"[{minimum}, {maximum}]"
+            str(error)
+            if "outside accepted" in str(error)
+            else (
+                "calibration.yml has no accepted "
+                "lookups.resonator_vs_flux cosine"
             )
-    return f0 + amplitude * np.cos(2 * np.pi * (values - peak) / period)
+        ) from error
+
+
+def resolve_readout_frequency(
+    project_root: Path,
+    z_gain: float,
+    *,
+    use_accepted_fit: bool,
+    fixed_frequency_mhz: float,
+) -> float:
+    """Choose and report a fitted or explicit readout frequency for one Z."""
+    if use_accepted_fit:
+        repository = load_repository(project_root)
+        frequency = float(resonator_frequency_from_flux(repository, z_gain))
+        print(
+            f"Accepted resonator-vs-Z fit: Z={float(z_gain):+.6f} -> "
+            f"r_freq={frequency:.6f} MHz"
+        )
+        return frequency
+    frequency = float(fixed_frequency_mhz)
+    if not np.isfinite(frequency):
+        raise ValueError("fixed_frequency_mhz must be finite")
+    print(
+        f"Manual readout frequency: Z={float(z_gain):+.6f} -> "
+        f"r_freq={frequency:.6f} MHz"
+    )
+    return frequency
 
 
 def run_flux_sweep(
@@ -317,10 +367,12 @@ def run_flux_sweep(
     preset: str,
     flux_values: Sequence[float],
     overrides: Optional[Mapping[str, Any]] = None,
+    run_options: Optional[Mapping[str, Any]] = None,
     title: Optional[str] = None,
     live_hardware: bool = False,
     flux_line: str = "z_rf",
     readout_frequency: Optional[Callable[[float], float]] = None,
+    readout_metadata: Optional[Mapping[str, Any]] = None,
     analyze_rows: bool = False,
     show_plot: bool = True,
     seed: int = 7,
@@ -329,6 +381,18 @@ def run_flux_sweep(
     values = np.asarray(flux_values, dtype=float)
     if values.ndim != 1 or values.size == 0 or not np.all(np.isfinite(values)):
         raise ValueError("flux_values must be a finite, non-empty 1D sequence")
+    readout_values = None
+    if readout_frequency is not None:
+        readout_values = np.asarray(
+            [readout_frequency(float(value)) for value in values],
+            dtype=float,
+        )
+        if readout_values.shape != values.shape or not np.all(
+            np.isfinite(readout_values)
+        ):
+            raise ValueError(
+                "readout_frequency must return one finite value per Z"
+            )
     repository = load_repository(project_root)
     base_overrides = deepcopy(dict(overrides or {}))
     connection = None
@@ -339,19 +403,25 @@ def run_flux_sweep(
         try:
             initial_overrides = deepcopy(base_overrides)
             initial_overrides["z_gain"] = float(values[0])
-            if readout_frequency is not None:
-                initial_overrides["r_freq"] = float(
-                    readout_frequency(float(values[0]))
-                )
-            initial = repository.resolve(
+            if readout_values is not None:
+                initial_overrides["r_freq"] = float(readout_values[0])
+            initial_runner = ExperimentRunner(repository, backend)
+            initial = initial_runner.plan(
+                experiment,
                 preset,
-                experiment=experiment,
                 overrides=initial_overrides,
+                run_options=run_options,
+                title=title,
             )
+            validate = getattr(backend, "validate", None)
+            preflight_details = (
+                validate(initial.plan) if callable(validate) else None
+            )
+            _print_envelope_preflight(preflight_details)
             flux = make_held_flux_controller(
                 connection,
                 repository,
-                initial.expanded_parameters(),
+                initial.config.expanded_parameters(),
                 line_name=flux_line,
             )
         except BaseException:
@@ -373,14 +443,13 @@ def run_flux_sweep(
     if live_hardware and connection is not None and original_data_path:
         preview_overrides = deepcopy(base_overrides)
         preview_overrides["z_gain"] = float(values[0])
-        if readout_frequency is not None:
-            preview_overrides["r_freq"] = float(
-                readout_frequency(float(values[0]))
-            )
+        if readout_values is not None:
+            preview_overrides["r_freq"] = float(readout_values[0])
         preview = runner.plan(
             experiment,
             preset,
             overrides=preview_overrides,
+            run_options=run_options,
             title=combined_title,
         )
         if len(preview.plan.axes) != 1:
@@ -407,7 +476,7 @@ def run_flux_sweep(
             "q": "Q",
         }
         dependent = []
-        if readout_frequency is not None:
+        if readout_values is not None:
             dependent.append(("Readout Frequency", "MHz"))
         dependent.extend(
             (
@@ -419,6 +488,12 @@ def run_flux_sweep(
         parameters = to_builtin(dict(preview.plan.variables))
         parameters["preset"] = preset
         parameters["z_gain_sweep"] = values.tolist()
+        if readout_values is not None:
+            parameters["r_freq_by_z"] = readout_values.tolist()
+        if readout_metadata is not None:
+            parameters["readout_frequency_calibration"] = to_builtin(
+                readout_metadata
+            )
         parameters[f"{inner_name}_sweep"] = to_builtin(
             preview.plan.variables[inner_name]
         )
@@ -454,13 +529,13 @@ def run_flux_sweep(
             except ImportError:
                 row_values = values
 
-        for value in row_values:
+        for row_index, value in enumerate(row_values):
             value = float(value)
             row_overrides = deepcopy(base_overrides)
             row_overrides["z_gain"] = value
             row_readout = None
-            if readout_frequency is not None:
-                row_readout = float(readout_frequency(value))
+            if readout_values is not None:
+                row_readout = float(readout_values[row_index])
                 row_overrides["r_freq"] = row_readout
             if flux is not None:
                 flux.set(value)
@@ -468,6 +543,7 @@ def run_flux_sweep(
                 experiment,
                 preset,
                 overrides=row_overrides,
+                run_options=run_options,
                 title=combined_title,
                 analyze=analyze_rows,
                 close_backend=False,
