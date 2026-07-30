@@ -399,6 +399,8 @@ def test_every_numbered_file_runs_to_completion_offline(tmp_path):
         module_globals["LIVE_HARDWARE"] = False
         if filename == "90_measurement_queue.py":
             module_globals["PROJECT_ROOT"] = ROOT
+        if filename == "91_autocal.py":
+            module_globals["TARGET"] = "coherence_only"
         if "SHOW_PLOT" in module_globals:
             module_globals["SHOW_PLOT"] = False
         if "SHOTS" in module_globals:
@@ -449,6 +451,10 @@ def test_every_numbered_file_runs_to_completion_offline(tmp_path):
             assert result is not None
         elif filename == "95_device_report.py":
             assert result.markdown_path.is_file()
+        elif filename == "92_review_proposals.py":
+            assert isinstance(result, list)
+        elif filename == "91_autocal.py":
+            assert result.status in {"completed", "completed_with_escalations"}
         elif isinstance(result, list):
             assert len(result) == 3
             assert all(row.status.startswith("completed") for row in result)

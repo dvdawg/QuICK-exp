@@ -683,13 +683,20 @@ class SyntheticBackend:
             elif plan.quick_class in {"QubitSpectroscopy", "TwoTone_ZPA"}:
                 frequency = variable("q_freq")
                 center = device.qubit_frequency(variable("z_gain", 0.0))
+                linewidth = np.maximum(
+                    device.qubit_linewidth(variable("q_gain", 0.0)),
+                    1e-9,
+                )
                 detuning = (
                     2.0
                     * (frequency - center)
-                    / max(float(device.qubit_linewidth_mhz), 1e-9)
+                    / linewidth
                 )
                 iq = 0.1 + 0.75 / (1.0 + 1j * detuning) + noise
                 truth["qubit_center_mhz"] = np.asarray(center).tolist()
+                truth["qubit_linewidth_mhz"] = np.asarray(
+                    linewidth
+                ).tolist()
             elif plan.quick_class == "DispersiveSpectroscopy":
                 frequency = variable("r_freq")
                 center = device.resonator_frequency(

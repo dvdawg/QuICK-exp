@@ -56,6 +56,9 @@ C:\Users\quant\anaconda3\envs\qcodes\python.exe -m pytest -q
 | `14_echo.py` | Hahn echo / fixed-cycle CPMG |
 | `16_two_photon_spectroscopy.py` | high-power two-photon search |
 | `90_measurement_queue.py` | run selected numbered files sequentially |
+| `91_autocal.py` | run/resume a policy-governed calibration target |
+| `92_review_proposals.py` | inspect, promote, or reject inert proposals |
+| `95_device_report.py` | local calibration/trend/QC report |
 
 The order and experiment variants follow `opx-expcode`; Quick classes, routing,
 and held-Z behavior were checked against `2026-07-21 MET v191.ipynb` and
@@ -80,6 +83,28 @@ cleanup. A task may override an `EDIT THESE` value without modifying the source:
 
 Duplicate files are allowed. `STOP_ON_ERROR=True` stops at the first failure;
 set it to `False` to continue and receive a `completed_with_errors` summary.
+
+## Automated calibration
+
+Open `91_autocal.py`, keep `LIVE_HARDWARE=False` for the first run, choose a
+target, and press Run. The default L0 autonomy level always writes complete
+fit records under `calibration.yml`'s inert top-level `proposals` mapping; it
+does not replace accepted records. Each session is restartable from
+`autocal_runs/<session_id>/state.yml`, and its append-only `decisions.jsonl`
+records every acquisition, gate, retake, escalation, proposal, and promotion
+decision without copying signal arrays.
+
+Create `autocal_runs/STOP` to stop cleanly between acquisitions. Resume by
+putting the prior session directory name in `SESSION_NAME`, after removing the
+sentinel. Use `92_review_proposals.py` to promote or reject L0 results. L1 and
+L2 promotion remain bounded by the hardware-owned `autocal` policy; cabling
+timing and flux lookup models are hard stops at every level.
+
+The full synthetic cold-start graph, STOP/resume, budget exhaustion,
+failure escalation, proposal promotion, and read-only replay with native-pair
+re-fitting are covered offline. Live rollout is deliberately staged: run
+supervised L0 sessions before enabling L1. See
+[AUTOCAL.md](AUTOCAL.md) for the operator runbook.
 
 ## Resonator-versus-Z fitted readout
 
@@ -111,9 +136,10 @@ hardware defaults < accepted calibration < preset < launcher overrides
 
 - `hardware.yml` contains the connection, routing, bounds, shared defaults, and
   native Quick output directory.
-- `calibration.yml` contains accepted values and provenance. The 01 editor
-  updates accepted `r_freq`, `q_freq`, and `r_offset` records with their matching
-  defaults so precedence stays intuitive.
+- `calibration.yml` contains accepted values, history, provenance, and inert
+  autocal proposals. Only accepted records participate in resolution. The 01
+  editor updates accepted `r_freq`, `q_freq`, and `r_offset` records with their
+  matching defaults so precedence stays intuitive.
 - `presets.yml` contains reusable experiment starting points.
 
 Live runs use only Quick's native numbered CSV/YML Saver. Ordinary runs get

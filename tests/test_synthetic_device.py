@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -85,6 +83,15 @@ def test_device_model_rabi_chevron_has_detuning_hyperbola():
         expected_ratio,
         rel=0.12,
     )
+
+
+def test_device_model_qubit_linewidth_tracks_drive_power_broadening():
+    device = DeviceModel(
+        qubit_linewidth_mhz=0.7,
+        qubit_power_broadening_mhz_per_gain=4.0,
+    )
+    assert device.qubit_linewidth(0.4) == pytest.approx(2.3)
+    assert device.qubit_linewidth(0.2) == pytest.approx(1.5)
 
 
 def test_failure_injection_drift_and_native_pair_persistence(tmp_path):

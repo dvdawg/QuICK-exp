@@ -33,6 +33,7 @@ class DeviceModel:
     qubit_asymmetry: float = 0.19
     ec_mhz: float = 180.0
     qubit_linewidth_mhz: float = 0.7
+    qubit_power_broadening_mhz_per_gain: float = 0.0
     rabi_rate_per_gain_mhz: float = 3.0
     t1_us: float = 6.2
     t1_flux_modulation_fraction: float = 0.20
@@ -102,6 +103,14 @@ class DeviceModel:
 
     def rabi_rate(self, q_gain: Any) -> np.ndarray:
         return np.abs(np.asarray(q_gain, dtype=float)) * self.rabi_rate_per_gain_mhz
+
+    def qubit_linewidth(self, q_gain: Any) -> np.ndarray:
+        """Return the intrinsic plus drive-power-broadened linewidth."""
+        return (
+            abs(float(self.qubit_linewidth_mhz))
+            + abs(float(self.qubit_power_broadening_mhz_per_gain))
+            * np.abs(np.asarray(q_gain, dtype=float))
+        )
 
     def coherence_time(self, kind: str) -> float:
         base = {

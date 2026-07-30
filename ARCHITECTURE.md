@@ -34,6 +34,13 @@ installed Quick 0.7.2. Library modules are not runnable entry points.
   provenance.
 - `task_queue.py` runs existing numbered launchers sequentially without bypassing
   their normal safety, persistence, or cleanup paths.
+- `autocal/` owns the explicit calibration DAG, search ladders, policy decisions,
+  budgets, atomic session state, append-only audit events, and the node scheduler.
+  Node acquisition still flows through `ide.run_experiment`; synthetic results
+  are materialized into native Quick pairs before fitting.
+- `fit_calibration.py` is the single atomic accepted-record and proposal
+  lifecycle writer. Proposal-only writes do not increment accepted calibration
+  revision and never participate in resolved configuration.
 - `rabi_fit.py` identifies native Time/Power Rabi axes from paired Quick YML,
   fits rotated IQ, quality-gates the pi recommendation, and atomically versions
   accepted `q_length`/`q_gain` defaults.
@@ -52,6 +59,22 @@ Resolution order is deterministic:
 ```text
 hardware defaults < accepted calibration < preset parameters < launcher overrides
 ```
+
+Automated calibration adds a control plane around, not beneath, that flow:
+
+```text
+91_autocal.py -> explicit target DAG -> IDE acquisition helper -> native pair
+                                  |                         |
+                                  v                         v
+                         fitter passes() gates       decisions.jsonl
+                                  |
+                                  v
+                   inert proposal -> policy -> optional promotion
+```
+
+`hardware.autocal` is a protected hardware root. A preset or run override
+cannot widen its drive caps, promotion allowlist, hard stops, attempt cap, run
+cap, or wall-clock cap. `autocal_runs/STOP` is checked before every acquisition.
 
 ## Quick 0.7.2 boundary
 

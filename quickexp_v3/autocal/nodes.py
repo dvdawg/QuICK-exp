@@ -1,0 +1,1689 @@
+"""Acquisition, fitting, gates, and proposal creation for autocal nodes."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass, replace
+import hashlib
+from pathlib import Path
+import time
+from typing import Any, Callable, Mapping, Optional, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+from .. import ide
+from ..backend import SyntheticBackend
+from ..config import accepted_calibration_values
+from ..data import BackendResult
+from ..errors import AnalysisError, ConfigError
+from ..fit_calibration import (
+    promote_proposal,
+    write_calibration_proposals,
+)
+from ..fit_stats import pi_consistency
+from ..iq_gmm import fit_iq_gmm, iq_calibration_records, load_iq_shots
+from ..native_fit import (
+    fit_loopback,
+    fit_ramsey,
+    fit_t1,
+)
+from ..native_fit_ext import echo_calibration_record, fit_echo
+from ..notch_fit import (
+    fit_complex_notch,
+    fit_spectroscopy_features,
+    notch_calibration_record,
+)
+from ..punchout_fit import fit_punchout, punchout_calibration_record
+from ..rabi_fit import calibration_record as rabi_calibration_record
+from ..rabi_fit import fit_rabi
+from ..resonator_flux import (
+    calibration_record as resonator_flux_calibration_record,
+)
+from ..resonator_flux import (
+    cosine_frequency,
+    fit_resonator_flux,
+    frequency_from_calibration_record,
+)
+from ..runtime import ExperimentRunner
+from ..synthetic_device import write_native_pair
+from ..util import dotted_get, to_builtin, utc_now
+from .budget import BudgetModel, BudgetTracker
+from .graph import NodeSpec
+from .policy import AutocalPolicy
+from .search import centered_sweep, expected_center, search_attempt
+from .session import AutocalSession
+
+
+class StopRequested(RuntimeError):
+    """The operator-created STOP sentinel was observed between acquisitions."""
+
+
+@dataclass(frozen=True)
+class NodeOutcome:
+    status: str
+    reason: str
+    values: Mapping[str, Any]
+    proposals: Tuple[str, ...] = ()
+    last_csv: Optional[str] = None
+    gates: Mapping[str, Any] = None
+
+
+@dataclass
+class SessionContext:
+    project_root: Path
+    session: AutocalSession
+    policy: AutocalPolicy
+    budget: BudgetTracker
+    budget_model: BudgetModel
+    autonomy_level: int
+    z_gain: float
+    live_hardware: bool = False
+    backend: Any = None
+
+    def repository(self):
+        return ide.load_repository(self.project_root)
+
+    def current_value(self, address: str) -> Any:
+        accepted = accepted_calibration_values(self.repository().calibration)
+        return dotted_get(accepted, address)
+
+    def working_value(self, address: str, default: Any = None) -> Any:
+        working = self.session.state.get("working_values", {})
+        if address in working:
+            return working[address]
+        current = self.current_value(address)
+        return default if current is None else current
+
+
+def _gate(value: Any, threshold: str, passed: bool) -> dict:
+    try:
+        scalar = float(value)
+        value = scalar if np.isfinite(scalar) else str(scalar)
+    except (TypeError, ValueError):
+        value = to_builtin(value)
+    return {
+        "value": value,
+        "threshold": str(threshold),
+        "passed": bool(passed),
+    }
+
+
+def _averaging_value(
+    ctx: SessionContext,
+    preset: str,
+    attempt: int,
+    *,
+    name: str = "hard_avg",
+) -> int:
+    repository = ctx.repository()
+    base = int(
+        repository.presets.get(preset, {})
+        .get("parameters", {})
+        .get(name, 1)
+    )
+    requested = base * min(2 ** max(int(attempt) - 1, 0), 4)
+    limits = repository.hardware.get("limits", {}).get(name)
+    maximum = int(limits[1]) if isinstance(limits, (list, tuple)) else requested
+    return max(1, min(requested, maximum))
+
+
+def _resonator_lookup_prediction(
+    ctx: SessionContext,
+) -> tuple[Optional[float], Optional[float], str]:
+    """Evaluate the session or accepted resonator lookup at the working Z."""
+    working = ctx.session.state.get("working_values", {})
+    working = working if isinstance(working, Mapping) else {}
+    proposed = working.get("lookups.resonator_vs_flux")
+    if isinstance(proposed, Mapping):
+        try:
+            parameters = proposed["parameters"]
+            minimum = float(
+                working["session.resonator_lookup_z_min"]
+            )
+            maximum = float(
+                working["session.resonator_lookup_z_max"]
+            )
+            rmse = float(
+                working["session.resonator_lookup_rmse_mhz"]
+            )
+            if not minimum <= float(ctx.z_gain) <= maximum:
+                return (
+                    None,
+                    None,
+                    "working Z is outside the newly fitted resonator lookup",
+                )
+            predicted = float(
+                cosine_frequency(float(ctx.z_gain), **dict(parameters))
+            )
+        except (KeyError, TypeError, ValueError, ConfigError):
+            return None, None, "new resonator lookup is incomplete"
+        if not np.isfinite(rmse) or rmse <= 0:
+            return None, None, "new resonator lookup has no positive RMSE"
+        return predicted, rmse, "newly fitted resonator lookup"
+
+    try:
+        record = (
+            ctx.repository()
+            .calibration["records"]["lookups"]["resonator_vs_flux"]
+        )
+        predicted = float(
+            frequency_from_calibration_record(record, float(ctx.z_gain))
+        )
+        uncertainty = record.get("uncertainty", {})
+        rmse = float(uncertainty["rmse_mhz"])
+    except (KeyError, TypeError, ValueError, ConfigError):
+        return None, None, "no accepted in-domain resonator lookup"
+    if not np.isfinite(rmse) or rmse <= 0:
+        return None, None, "accepted resonator lookup has no positive RMSE"
+    return predicted, rmse, "accepted resonator lookup"
+
+
+def _record(
+    *,
+    value: Any,
+    unit: str,
+    source_csv: Path,
+    analysis: str,
+    quality: Mapping[str, Any],
+    uncertainty: Any = None,
+    valid_domain: Optional[Mapping[str, Any]] = None,
+    model: str,
+    notes: str = "",
+) -> dict:
+    return {
+        "value": to_builtin(value),
+        "unit": str(unit),
+        "uncertainty": to_builtin(uncertainty),
+        "provenance": {
+            "source": str(source_csv),
+            "source_yml": str(Path(source_csv).with_suffix(".yml")),
+            "fitted_at": utc_now(),
+            "analysis": str(analysis),
+        },
+        "quality": to_builtin(dict(quality)),
+        "valid_domain": to_builtin(dict(valid_domain or {})),
+        "model": str(model),
+        "notes": str(notes),
+        "status": "accepted",
+        "accepted_at": utc_now(),
+    }
+
+
+def _native_matrix(planned: Any, completed: Any) -> np.ndarray:
+    columns = []
+    for name in planned.plan.axes:
+        columns.append(np.asarray(completed.data.axes[name]))
+    for name in planned.plan.signal_names:
+        columns.append(np.asarray(completed.data.signals[name]))
+    return np.column_stack(columns)
+
+
+def _native_path(
+    ctx: SessionContext,
+    *,
+    node_id: str,
+    planned: Any,
+    completed: Any,
+) -> Path:
+    native_files = completed.data.metadata.get("native_files", ())
+    if native_files:
+        source = Path(native_files[0]).expanduser().resolve()
+        if not source.is_file() or source.stat().st_size == 0:
+            raise AnalysisError(f"native acquisition is missing or empty: {source}")
+        return source
+    index = ctx.budget.total_runs
+    return write_native_pair(
+        ctx.session.native_directory,
+        planned.plan,
+        BackendResult(payload=_native_matrix(planned, completed)),
+        index=index,
+        title=f"{ctx.session.session_id}_{node_id}_{planned.plan.title}",
+    )
+
+
+def _acquire(
+    ctx: SessionContext,
+    *,
+    node_id: str,
+    experiment: str,
+    preset: str,
+    overrides: Optional[Mapping[str, Any]] = None,
+    run_options: Optional[Mapping[str, Any]] = None,
+) -> tuple:
+    if ctx.session.stop_requested():
+        raise StopRequested("autocal_runs/STOP was found")
+    repository = ctx.repository()
+    safe_overrides = ctx.policy.clamp_overrides(dict(overrides or {}))
+    if "z_gain" not in safe_overrides:
+        safe_overrides["z_gain"] = float(ctx.z_gain)
+    acquisition_z_gain = float(safe_overrides["z_gain"])
+    planner_backend = ctx.backend or SyntheticBackend(seed=0)
+    planned = ExperimentRunner(repository, planner_backend).plan(
+        experiment,
+        preset,
+        overrides=safe_overrides,
+        run_options=run_options,
+        title=f"{ctx.session.session_id}_{node_id}",
+    )
+    predicted = ctx.budget_model.estimate(planned.plan)
+    ctx.budget.check(predicted)
+    started = time.monotonic()
+    try:
+        completed = ide.run_experiment(
+            ctx.project_root,
+            experiment=experiment,
+            preset=preset,
+            overrides=safe_overrides,
+            run_options=run_options,
+            title=f"{ctx.session.session_id}_{node_id}",
+            live_hardware=ctx.live_hardware,
+            fixed_z_gain=acquisition_z_gain,
+            analyze=False,
+            show_plot=False,
+            backend=ctx.backend,
+        )
+    finally:
+        measured = time.monotonic() - started
+        ctx.budget.record(measured)
+        ctx.budget_model.observe(predicted, measured)
+        ctx.session.set_budget(ctx.budget.as_dict())
+        plt.close("all")
+    csv_path = _native_path(
+        ctx,
+        node_id=node_id,
+        planned=planned,
+        completed=completed,
+    )
+    if planned.plan.quick_class == "IQScatter":
+        expected_points = int(planned.plan.variables.get("rep", completed.data.points))
+    else:
+        expected_points = 1
+        for axis in planned.plan.axes:
+            expected_points *= np.asarray(
+                planned.plan.variables.get(axis, completed.data.axes[axis])
+            ).size
+    if completed.data.points != expected_points:
+        raise AnalysisError(
+            f"{node_id} acquired {completed.data.points} points; "
+            f"the plan declared {expected_points}"
+        )
+    ctx.session.event(
+        "acquisition_completed",
+        node=node_id,
+        decision="fit",
+        reason="native acquisition is complete",
+        csv=str(csv_path),
+        points=int(completed.data.points),
+        predicted_seconds=float(predicted),
+        measured_seconds=float(measured),
+        total_runs=int(ctx.budget.total_runs),
+    )
+    return completed, planned, csv_path
+
+
+def _proposal_id(session_id: str, node_id: str, address: str) -> str:
+    identity = f"{session_id}\0{node_id}\0{address}".encode("utf-8")
+    digest = hashlib.sha256(identity).hexdigest()[:8]
+    safe_address = address.replace(".", "-").replace("_", "-")
+    return f"{session_id}-{node_id}-{safe_address}-{digest}"
+
+
+def _propose(
+    ctx: SessionContext,
+    *,
+    node_id: str,
+    records: Mapping[str, Mapping[str, Any]],
+    gates_pass: bool,
+    gate_table: Optional[Mapping[str, Any]] = None,
+    ramsey_sign_confirmed: bool = False,
+) -> tuple:
+    identifiers = []
+    working = {}
+    for address, raw in records.items():
+        proposal = deepcopy(dict(raw))
+        for key in (
+            "accepted_at",
+            "accepted_by",
+            "accepted_revision",
+            "proposal_id",
+            "created_at",
+        ):
+            proposal.pop(key, None)
+        provenance = proposal.setdefault("provenance", {})
+        if not isinstance(provenance, dict):
+            provenance = {}
+            proposal["provenance"] = provenance
+        provenance.update(
+            {
+                "autocal_session": ctx.session.session_id,
+                "autocal_node": node_id,
+                "working_z_gain": float(ctx.z_gain),
+            }
+        )
+        quality = proposal.setdefault("quality", {})
+        if not isinstance(quality, dict):
+            quality = {"fit_quality": to_builtin(quality)}
+            proposal["quality"] = quality
+        quality["autocal_gates"] = to_builtin(dict(gate_table or {}))
+        quality["autocal_gates_passed"] = bool(gates_pass)
+        proposal["record"] = str(address)
+        proposal["status"] = "proposed"
+        identifier = _proposal_id(ctx.session.session_id, node_id, address)
+        write_calibration_proposals(
+            ctx.project_root,
+            {identifier: proposal},
+        )
+        identifiers.append(identifier)
+        working[address] = proposal.get("value")
+        ctx.session.event(
+            "proposal_written",
+            node=node_id,
+            decision="proposed",
+            reason="fit passed and proposal is inert until policy promotion",
+            proposal_id=identifier,
+            record=address,
+            value=proposal.get("value"),
+        )
+        decision = ctx.policy.promotion_decision(
+            autonomy_level=ctx.autonomy_level,
+            proposal=proposal,
+            current_value=ctx.current_value(address),
+            gates_pass=gates_pass,
+            working_z_gain=ctx.z_gain,
+            ramsey_sign_confirmed=ramsey_sign_confirmed,
+        )
+        ctx.session.event(
+            "promotion_evaluated",
+            node=node_id,
+            decision="promote" if decision.promote else "retain_proposal",
+            reason=decision.reason,
+            proposal_id=identifier,
+            record=address,
+        )
+        if decision.promote:
+            promote_proposal(
+                ctx.project_root,
+                identifier,
+                accepted_by=f"autocal-L{ctx.autonomy_level}",
+            )
+            ctx.session.event(
+                "auto_promoted",
+                node=node_id,
+                decision="accepted",
+                reason=decision.reason,
+                proposal_id=identifier,
+                record=address,
+            )
+            ctx.session.state["calibration_revision"] = int(
+                ctx.repository().calibration.get("revision", 0)
+            )
+    ctx.session.set_working_values(working)
+    return tuple(identifiers), working
+
+
+def _fit_event(
+    ctx: SessionContext,
+    node_id: str,
+    *,
+    csv_path: Path,
+    gates: Mapping[str, Any],
+    passed: bool,
+    reason: str,
+) -> None:
+    ctx.session.event(
+        "fit_evaluated",
+        node=node_id,
+        decision="accept" if passed else "retake",
+        reason=reason,
+        csv=str(csv_path),
+        gates=to_builtin(dict(gates)),
+    )
+
+
+def _n0(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    repository = ctx.repository()
+    connection = ide.inspect_connection(
+        ctx.project_root,
+        live_hardware=ctx.live_hardware,
+    )
+    facts = {
+        "backend": (
+            getattr(ctx.backend, "snapshot", lambda: {"backend": "live"})()
+            if ctx.backend is not None
+            else {"backend": "live" if ctx.live_hardware else "synthetic"}
+        ),
+        "bitfile_sha256": repository.hardware.get("qick", {}).get(
+            "bitfile_sha256"
+        ),
+        "reference_clock_mhz": repository.hardware.get("qick", {}).get(
+            "reference_clock_mhz"
+        ),
+        "adc_fullscale_counts": repository.hardware.get(
+            "expected", {}
+        ).get("adc_fullscale_counts"),
+        "soccfg_sha256": None,
+        "generator_metadata_sha256": None,
+    }
+    if connection is not None:
+        soccfg_text = str(connection.soccfg)
+        facts["soccfg_sha256"] = hashlib.sha256(
+            soccfg_text.encode("utf-8")
+        ).hexdigest()
+        try:
+            generator_metadata = connection.soccfg["gens"]
+        except (KeyError, TypeError):
+            generator_metadata = getattr(connection.soccfg, "gens", None)
+        if generator_metadata is not None:
+            facts["generator_metadata_sha256"] = hashlib.sha256(
+                repr(generator_metadata).encode("utf-8")
+            ).hexdigest()
+        closer = getattr(connection, "close", None)
+        if not callable(closer):
+            closer = getattr(getattr(connection, "backend", None), "close", None)
+        if callable(closer):
+            closer()
+    facts["missing_hardware_facts"] = [
+        name
+        for name in (
+            "bitfile_sha256",
+            "reference_clock_mhz",
+            "adc_fullscale_counts",
+        )
+        if facts[name] is None
+    ]
+    ctx.session.state["facts"] = to_builtin(facts)
+    ctx.session.save()
+    return NodeOutcome("done", "connection and configured ports inspected", facts)
+
+
+def _n1(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    overrides = {
+        "soft_avg": _averaging_value(
+            ctx,
+            "loopback",
+            attempt,
+            name="soft_avg",
+        )
+    }
+    if attempt > 1:
+        overrides["r_offset"] = 0.0
+    _completed, _planned, csv_path = _acquire(
+        ctx,
+        node_id=spec.node_id,
+        experiment="loopback",
+        preset="loopback",
+        overrides=overrides,
+    )
+    fit = fit_loopback(csv_path)
+    passed = fit.passes(
+        minimum_edge_snr=5.0,
+        minimum_r_squared=0.85,
+        maximum_edge_uncertainty_us=0.02,
+    )
+    edge = float(fit.parameters["edge_in_trace_us"])
+    span = float(np.ptp(fit.time_us))
+    middle = fit.time_us[0] + 0.05 * span < edge < fit.time_us[-1] - 0.05 * span
+    gates = {
+        "edge_snr": _gate(fit.statistics["edge_snr"], ">= 5", fit.statistics["edge_snr"] >= 5),
+        "r_squared": _gate(fit.statistics["r_squared"], ">= 0.85", fit.statistics["r_squared"] >= 0.85),
+        "edge_uncertainty_us": _gate(
+            fit.parameters["edge_uncertainty_us"],
+            "<= 0.02",
+            fit.parameters["edge_uncertainty_us"] <= 0.02,
+        ),
+        "edge_inside_middle_90_percent": _gate(edge, "middle 90%", middle),
+    }
+    passed = bool(passed and middle)
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=csv_path,
+        gates=gates,
+        passed=passed,
+        reason="loopback edge gates passed" if passed else "loopback edge gates failed",
+    )
+    if not passed:
+        return NodeOutcome("retake", "loopback edge gates failed", {}, last_csv=str(csv_path), gates=gates)
+    record = _record(
+        value=fit.recommended_r_offset_us,
+        unit="us",
+        source_csv=csv_path,
+        analysis="quickexp_v3.native_fit.fit_loopback",
+        quality=fit.statistics,
+        uncertainty={
+            "edge_us": fit.parameters["edge_uncertainty_us"],
+            "rise_10_to_90_us": fit.parameters["rise_10_to_90_us"],
+        },
+        model="smoothed_iq_logistic_edge",
+    )
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records={"defaults.r_offset": record},
+        gates_pass=True,
+        gate_table=gates,
+    )
+    return NodeOutcome("done", "loopback timing fitted", values, proposals, str(csv_path), gates)
+
+
+def _n2(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    center = float(ctx.working_value("defaults.r_freq", 6884.0))
+    frequency = centered_sweep(
+        center,
+        30.0,
+        121 if attempt == 1 else 241,
+        bounds=ctx.repository().hardware["limits"]["r_freq"],
+    )
+    # The hardware-owned autocal cap is -20 dB, so search both plateaus on
+    # the safe side of that cap rather than clipping an unsafe grid into
+    # duplicate points.
+    powers = np.linspace(-45.0, -20.0, 11 if attempt == 1 else 21)
+    _completed, _planned, csv_path = _acquire(
+        ctx,
+        node_id=spec.node_id,
+        experiment="resonator_spectroscopy",
+        preset="resonator_power",
+        overrides={
+            "r_freq": frequency,
+            "r_power": powers,
+            "hard_avg": _averaging_value(
+                ctx,
+                "resonator_power",
+                attempt,
+            ),
+        },
+    )
+    fit = fit_punchout(csv_path, prior_linewidth_mhz=0.5)
+    passed = fit.passes(
+        minimum_plateau_rows=2,
+        minimum_shift_over_step=2.0,
+        maximum_transition_width_db=15.0,
+    )
+    gates = {
+        "status_resolved": _gate(fit.status, "resolved", fit.status == "resolved"),
+        "shift_over_step": _gate(
+            fit.statistics["shift_over_frequency_step"],
+            ">= 2",
+            fit.statistics["shift_over_frequency_step"] >= 2,
+        ),
+        "low_plateau_rows": _gate(
+            fit.statistics["low_plateau_rows"],
+            ">= 2",
+            fit.statistics["low_plateau_rows"] >= 2,
+        ),
+        "high_plateau_rows": _gate(
+            fit.statistics["high_plateau_rows"],
+            ">= 2",
+            fit.statistics["high_plateau_rows"] >= 2,
+        ),
+        "transition_width_db": _gate(
+            fit.parameters.get("transition_width_db", "unavailable"),
+            "<= 15",
+            (
+                fit.status == "resolved"
+                and fit.parameters["transition_width_db"] <= 15.0
+            ),
+        ),
+        "parameters_not_pinned": _gate(
+            fit.statistics.get("pinned_parameters", []),
+            "empty",
+            not fit.statistics.get("pinned_parameters"),
+        ),
+    }
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=csv_path,
+        gates=gates,
+        passed=passed,
+        reason="punchout plateaus resolved" if passed else "punchout needs a denser retake",
+    )
+    if not passed:
+        return NodeOutcome("retake", "punchout plateaus unresolved", {}, last_csv=str(csv_path), gates=gates)
+    record = punchout_calibration_record(fit)
+    plateau = float(fit.parameters["f_low_mhz"])
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records={"defaults.r_power": record},
+        gates_pass=True,
+        gate_table=gates,
+    )
+    values = {**values, "session.f_r_plateau": plateau}
+    ctx.session.set_working_values({"session.f_r_plateau": plateau})
+    return NodeOutcome("done", "punchout plateaus fitted", values, proposals, str(csv_path), gates)
+
+
+def _n3(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    z_values = np.linspace(-0.30, 0.30, 13)
+    rows = []
+    first_plan = None
+    last_csv = None
+    repository = ctx.repository()
+    try:
+        lookup = repository.calibration["records"]["lookups"]["resonator_vs_flux"]
+    except (KeyError, TypeError):
+        lookup = None
+    try:
+        map_center = float(lookup["value"]["parameters"]["center_frequency"])
+    except (KeyError, TypeError, ValueError):
+        map_center = float(ctx.working_value("defaults.r_freq", 6884.0))
+    frequency = centered_sweep(
+        map_center,
+        6.0,
+        101,
+        bounds=repository.hardware["limits"]["r_freq"],
+    )
+    if ctx.live_hardware:
+        if ctx.session.stop_requested():
+            raise StopRequested("autocal_runs/STOP was found")
+        preview = ExperimentRunner(repository, SyntheticBackend(seed=0)).plan(
+            "resonator_spectroscopy",
+            "resonator_fine",
+            overrides={
+                "r_freq": frequency,
+                "z_gain": float(z_values[0]),
+                "hard_avg": _averaging_value(
+                    ctx,
+                    "resonator_fine",
+                    attempt,
+                ),
+            },
+            title=f"{ctx.session.session_id}_{spec.node_id}_map",
+        )
+        predicted = ctx.budget_model.estimate(preview.plan)
+        starts = {}
+        observations = []
+
+        def before_row(row_index: int, z_gain: float) -> None:
+            if ctx.session.stop_requested():
+                raise StopRequested("autocal_runs/STOP was found")
+            ctx.budget.check(predicted)
+            starts[row_index] = time.monotonic()
+
+        def after_row(
+            row_index: int,
+            z_gain: float,
+            completed: Optional[Any],
+        ) -> None:
+            measured = time.monotonic() - starts.get(row_index, time.monotonic())
+            ctx.budget.record(measured)
+            ctx.budget_model.observe(predicted, measured)
+            ctx.session.set_budget(ctx.budget.as_dict())
+            observations.append(
+                {
+                    "row": int(row_index),
+                    "z_gain": float(z_gain),
+                    "points": (
+                        int(completed.data.points)
+                        if completed is not None
+                        else 0
+                    ),
+                    "predicted_seconds": float(predicted),
+                    "measured_seconds": float(measured),
+                }
+            )
+
+        completed_rows = ide.run_flux_sweep(
+            ctx.project_root,
+            experiment="resonator_spectroscopy",
+            preset="resonator_fine",
+            flux_values=z_values,
+            overrides={
+                "r_freq": frequency,
+                "hard_avg": _averaging_value(
+                    ctx,
+                    "resonator_fine",
+                    attempt,
+                ),
+            },
+            title=f"{ctx.session.session_id}_{spec.node_id}_map",
+            live_hardware=True,
+            analyze_rows=False,
+            show_plot=False,
+            before_row=before_row,
+            after_row=after_row,
+        )
+        if len(completed_rows) != len(z_values):
+            raise AnalysisError(
+                f"{spec.node_id} acquired {len(completed_rows)} of "
+                f"{len(z_values)} flux rows"
+            )
+        native_files = completed_rows[0].data.metadata.get("native_files", ())
+        if not native_files:
+            raise AnalysisError("live resonator flux map has no native Saver path")
+        csv_path = Path(native_files[0]).expanduser().resolve()
+        if not csv_path.is_file() or csv_path.stat().st_size == 0:
+            raise AnalysisError(
+                f"live resonator flux map is missing or empty: {csv_path}"
+            )
+        for observation in observations:
+            ctx.session.event(
+                "acquisition_completed",
+                node=spec.node_id,
+                decision="fit",
+                reason="native flux-map row is complete",
+                csv=str(csv_path),
+                total_runs=int(ctx.budget.total_runs),
+                **observation,
+            )
+        plt.close("all")
+    else:
+        csv_path = None
+    for row_index, z_gain in enumerate(z_values):
+        if ctx.live_hardware:
+            break
+        completed, planned, last_csv = _acquire(
+            ctx,
+            node_id=spec.node_id,
+            experiment="resonator_spectroscopy",
+            preset="resonator_fine",
+            overrides={
+                "r_freq": frequency,
+                "z_gain": float(z_gain),
+                "hard_avg": _averaging_value(
+                    ctx,
+                    "resonator_fine",
+                    attempt,
+                ),
+            },
+        )
+        if first_plan is None:
+            first_plan = planned
+        matrix = _native_matrix(planned, completed)
+        rows.append(
+            np.column_stack(
+                (
+                    np.full(matrix.shape[0], float(z_gain)),
+                    matrix,
+                )
+            )
+        )
+    if not ctx.live_hardware:
+        map_plan = replace(
+            first_plan.plan,
+            axes=("z_gain", "r_freq"),
+            variables={
+                **dict(first_plan.plan.variables),
+                "z_gain": z_values,
+                "r_freq": np.asarray(first_plan.plan.variables["r_freq"]),
+            },
+            axis_units={"z_gain": "", "r_freq": "MHz"},
+            title=f"{ctx.session.session_id}_{spec.node_id}_map",
+        )
+        csv_path = write_native_pair(
+            ctx.session.native_directory,
+            map_plan,
+            BackendResult(payload=np.vstack(rows)),
+            index=ctx.budget.total_runs + 1,
+            title=map_plan.title,
+        )
+    fit = fit_resonator_flux(
+        csv_path,
+        period_min=0.12,
+        period_max=0.30,
+    )
+    passed = fit.passes(minimum_r_squared=0.95, maximum_rmse_mhz=0.2)
+    gates = {
+        "r_squared": _gate(fit.statistics["r_squared"], ">= 0.95", fit.statistics["r_squared"] >= 0.95),
+        "rmse_mhz": _gate(fit.statistics["rmse_mhz"], "<= 0.2", fit.statistics["rmse_mhz"] <= 0.2),
+        "complete_z_rows": _gate(len(fit.z_gain), ">= 6", len(fit.z_gain) >= 6),
+    }
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=csv_path,
+        gates=gates,
+        passed=passed,
+        reason="resonator flux cosine passed" if passed else "resonator flux cosine failed",
+    )
+    if not passed:
+        return NodeOutcome("retake", "resonator flux fit failed", {}, last_csv=str(csv_path), gates=gates)
+    record = resonator_flux_calibration_record(fit)
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records={"lookups.resonator_vs_flux": record},
+        gates_pass=True,
+        gate_table=gates,
+    )
+    lookup_session_values = {
+        "session.resonator_lookup_rmse_mhz": float(
+            fit.statistics["rmse_mhz"]
+        ),
+        "session.resonator_lookup_z_min": float(np.min(fit.z_gain)),
+        "session.resonator_lookup_z_max": float(np.max(fit.z_gain)),
+    }
+    ctx.session.set_working_values(lookup_session_values)
+    values = {**values, **lookup_session_values}
+    return NodeOutcome("done", "resonator flux lookup fitted", values, proposals, str(csv_path), gates)
+
+
+def _n4(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    lookup_frequency, lookup_rmse, lookup_source = (
+        _resonator_lookup_prediction(ctx)
+    )
+    if lookup_frequency is None or lookup_rmse is None:
+        return NodeOutcome(
+            "blocked",
+            f"{lookup_source}; N4 will not acquire without a physics cross-check",
+            {},
+        )
+    ctx.session.set_working_values(
+        {
+            "session.n4_lookup_frequency_mhz": float(lookup_frequency),
+            "session.n4_lookup_rmse_mhz": float(lookup_rmse),
+            "session.n4_lookup_source": str(lookup_source),
+        }
+    )
+    center = float(
+        ctx.working_value(
+            "session.f_r_plateau",
+            lookup_frequency,
+        )
+    )
+    frequency = centered_sweep(
+        center,
+        search_attempt(10.0, attempt),
+        201,
+        bounds=ctx.repository().hardware["limits"]["r_freq"],
+    )
+    _completed, _planned, csv_path = _acquire(
+        ctx,
+        node_id=spec.node_id,
+        experiment="resonator_spectroscopy",
+        preset="resonator_fine",
+        overrides={
+            "r_freq": frequency,
+            "hard_avg": _averaging_value(
+                ctx,
+                "resonator_fine",
+                attempt,
+            ),
+        },
+    )
+    fit = fit_complex_notch(csv_path)
+    fit_passed = fit.passes(
+        minimum_r_squared=0.60,
+        minimum_contrast_snr=4.0,
+        minimum_edge_distance_over_fwhm=1.0,
+    )
+    lookup_delta = abs(float(fit.center_mhz) - lookup_frequency)
+    lookup_sigma = lookup_delta / lookup_rmse
+    lookup_consistent = lookup_sigma <= 3.0
+    passed = bool(fit_passed and lookup_consistent)
+    gates = {
+        "r_squared_complex": _gate(
+            fit.statistics["r_squared_complex"],
+            ">= 0.60",
+            fit.statistics["r_squared_complex"] >= 0.60,
+        ),
+        "contrast_snr": _gate(
+            fit.statistics["contrast_snr"],
+            ">= 4",
+            fit.statistics["contrast_snr"] >= 4,
+        ),
+        "edge_distance_over_fwhm": _gate(
+            fit.statistics["edge_distance_over_fwhm"],
+            ">= 1",
+            fit.statistics["edge_distance_over_fwhm"] >= 1,
+        ),
+        "parameters_not_pinned": _gate(
+            fit.statistics.get("pinned_parameters", []),
+            "empty",
+            not fit.statistics.get("pinned_parameters"),
+        ),
+        "lookup_consistency_sigma": _gate(
+            lookup_sigma,
+            f"<= 3 ({lookup_source}, RMSE={lookup_rmse:.6g} MHz)",
+            lookup_consistent,
+        ),
+    }
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=csv_path,
+        gates=gates,
+        passed=passed,
+        reason=(
+            "complex notch and lookup-consistency gates passed"
+            if passed
+            else "notch window/SNR or lookup-consistency retake needed"
+        ),
+    )
+    if not passed:
+        if fit_passed and lookup_sigma > 5.0:
+            return NodeOutcome(
+                "blocked",
+                "notch center disagrees with the resonator lookup by more than 5 sigma",
+                {},
+                last_csv=str(csv_path),
+                gates=gates,
+            )
+        return NodeOutcome(
+            "retake",
+            "complex notch or lookup-consistency gates failed",
+            {},
+            last_csv=str(csv_path),
+            gates=gates,
+        )
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records={"defaults.r_freq": notch_calibration_record(fit)},
+        gates_pass=True,
+        gate_table=gates,
+    )
+    return NodeOutcome("done", "working-point notch fitted", values, proposals, str(csv_path), gates)
+
+
+def _spectroscopy_record(fit: Any, z_gain: float) -> dict:
+    return _record(
+        value=fit.center_mhz,
+        unit="MHz",
+        source_csv=fit.source_csv,
+        analysis="quickexp_v3.notch_fit.fit_spectroscopy_features",
+        quality=fit.statistics,
+        uncertainty={
+            "center_mhz": fit.parameters["center_uncertainty_mhz"],
+            "fwhm_mhz": fit.parameters["fwhm_mhz"],
+        },
+        valid_domain={"z_gain": [float(z_gain), float(z_gain)]},
+        model="lorentzian_feature_with_bic_model_selection",
+    )
+
+
+def _n5(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    repository = ctx.repository()
+    q_delta_mhz = float(
+        repository.hardware["defaults"].get("q_delta", -180.0)
+    )
+    ctx.session.set_working_values(
+        {"session.q_delta_mhz": q_delta_mhz}
+    )
+    accepted_center = float(ctx.working_value("defaults.q_freq", 5600.0))
+    expected_q = repository.hardware.get("expected", {}).get("q_freq_mhz")
+    expected_span = 2000.0
+    if isinstance(expected_q, (list, tuple)) and len(expected_q) == 2:
+        try:
+            expected_values = np.asarray(expected_q, dtype=float)
+            if (
+                np.all(np.isfinite(expected_values))
+                and expected_values[0] < expected_values[1]
+            ):
+                expected_span = float(np.ptp(expected_values))
+        except (TypeError, ValueError):
+            pass
+    coarse_center = expected_center(
+        repository.hardware,
+        "q_freq_mhz",
+        accepted_center,
+    )
+    session_working = ctx.session.state.get("working_values", {})
+    session_working = (
+        session_working if isinstance(session_working, Mapping) else {}
+    )
+    prior_candidate = session_working.get("session.n5_coarse_center_mhz")
+    if attempt > 1 and prior_candidate is not None:
+        coarse_center = float(prior_candidate)
+        coarse_span = 400.0
+    elif attempt > 1:
+        coarse_span = min(
+            max(3.0 * expected_span, 4000.0),
+            float(np.ptp(repository.hardware["limits"]["q_freq"])),
+        )
+    else:
+        coarse_span = expected_span
+    coarse_points = min(
+        max(int(round(coarse_span)) + 1, 801),
+        4001,
+    )
+    coarse = centered_sweep(
+        coarse_center,
+        coarse_span,
+        coarse_points,
+        bounds=repository.hardware["limits"]["q_freq"],
+    )
+    _coarse_run, _coarse_plan, coarse_csv = _acquire(
+        ctx,
+        node_id=spec.node_id,
+        experiment="qubit_spectroscopy",
+        preset="qubit_coarse",
+        overrides={
+            "q_freq": coarse,
+            "hard_avg": _averaging_value(
+                ctx,
+                "qubit_coarse",
+                attempt,
+            ),
+        },
+    )
+    # The synthetic and native readout response is a complex dispersive arc.
+    # Its deterministic IQ projection can be odd-symmetric on a centered fine
+    # window; amplitude is the launcher-supported scalar channel that retains
+    # the qubit feature without a rotation-sign ambiguity.
+    coarse_fit = fit_spectroscopy_features(
+        coarse_csv,
+        kind="qubit",
+        signal="amplitude",
+    )
+    multi_feature = bool(coarse_fit.statistics.get("multi_feature"))
+    shadow_recognized = not multi_feature
+    if multi_feature:
+        features = list(coarse_fit.parameters.get("features", ()))
+        expected_shadow_separation = abs(q_delta_mhz) / 2.0
+        if len(features) == 2:
+            measured_separation = abs(
+                float(features[0]["center_mhz"])
+                - float(features[1]["center_mhz"])
+            )
+            shadow_recognized = (
+                abs(measured_separation - expected_shadow_separation)
+                <= max(10.0, 0.20 * expected_shadow_separation)
+            )
+        if shadow_recognized:
+            selected_center = float(coarse_fit.center_mhz)
+            half_window = min(
+                max(5.0 * float(coarse_fit.parameters["fwhm_mhz"]), 10.0),
+                0.40 * expected_shadow_separation,
+            )
+            coarse_fit = fit_spectroscopy_features(
+                coarse_csv,
+                kind="qubit",
+                signal="amplitude",
+                window_mhz=(
+                    selected_center - half_window,
+                    selected_center + half_window,
+                ),
+            )
+        else:
+            gates = {
+                "coarse_single_or_f02_shadow": _gate(
+                    coarse_fit.statistics["delta_bic_two_vs_one"],
+                    "single feature or second feature within 20% of |q_delta|/2",
+                    False,
+                ),
+                "coarse_r_squared": _gate(
+                    coarse_fit.statistics["r_squared"],
+                    ">= 0.50",
+                    coarse_fit.statistics["r_squared"] >= 0.50,
+                ),
+                "coarse_contrast_snr": _gate(
+                    coarse_fit.statistics["contrast_snr"],
+                    ">= 3",
+                    coarse_fit.statistics["contrast_snr"] >= 3,
+                ),
+                "coarse_parameters_not_pinned": _gate(
+                    coarse_fit.statistics.get("pinned_parameters", []),
+                    "empty",
+                    not coarse_fit.statistics.get("pinned_parameters"),
+                ),
+            }
+            _fit_event(
+                ctx,
+                spec.node_id,
+                csv_path=coarse_csv,
+                gates=gates,
+                passed=False,
+                reason="coarse qubit scan contains unresolved multiple features",
+            )
+            return NodeOutcome(
+                "blocked",
+                "coarse qubit features are physically ambiguous",
+                {},
+                last_csv=str(coarse_csv),
+                gates=gates,
+            )
+    coarse_pass = coarse_fit.passes(
+        minimum_r_squared=0.50,
+        minimum_contrast_snr=3.0,
+        maximum_center_uncertainty_fraction_of_fwhm=0.30,
+    )
+    if not coarse_pass:
+        gates = {
+            "coarse_single_or_f02_shadow": _gate(
+                coarse_fit.statistics["delta_bic_two_vs_one"],
+                "single feature or recognized f02/2 shadow",
+                shadow_recognized,
+            ),
+            "coarse_r_squared": _gate(coarse_fit.statistics["r_squared"], ">= 0.50", coarse_fit.statistics["r_squared"] >= 0.50),
+            "coarse_contrast_snr": _gate(coarse_fit.statistics["contrast_snr"], ">= 3", coarse_fit.statistics["contrast_snr"] >= 3),
+            "coarse_parameters_not_pinned": _gate(
+                coarse_fit.statistics.get("pinned_parameters", []),
+                "empty",
+                not coarse_fit.statistics.get("pinned_parameters"),
+            ),
+        }
+        _fit_event(
+            ctx,
+            spec.node_id,
+            csv_path=coarse_csv,
+            gates=gates,
+            passed=False,
+            reason="coarse qubit feature did not pass",
+        )
+        return NodeOutcome("retake", "coarse qubit feature failed", {}, last_csv=str(coarse_csv), gates=gates)
+    ctx.session.set_working_values(
+        {"session.n5_coarse_center_mhz": float(coarse_fit.center_mhz)}
+    )
+    fine = centered_sweep(
+        coarse_fit.center_mhz,
+        20.0,
+        201,
+        bounds=repository.hardware["limits"]["q_freq"],
+    )
+    q_gain = 0.5 * float(
+        np.asarray(
+            ctx.policy.clamp_overrides(
+                {"q_gain": repository.presets["qubit_coarse"]["parameters"]["q_gain"]}
+            )["q_gain"]
+        )
+    )
+    q_gain = max(q_gain, 0.1)
+    _fine_run, _fine_plan, fine_csv = _acquire(
+        ctx,
+        node_id=spec.node_id,
+        experiment="qubit_spectroscopy",
+        preset="qubit_fine",
+        overrides={
+            "q_freq": fine,
+            "q_gain": q_gain,
+            "hard_avg": _averaging_value(
+                ctx,
+                "qubit_fine",
+                attempt,
+            ),
+        },
+    )
+    fit = fit_spectroscopy_features(
+        fine_csv,
+        kind="qubit",
+        signal="amplitude",
+    )
+    fit_pass = fit.passes(
+        minimum_r_squared=0.50,
+        minimum_contrast_snr=3.0,
+        maximum_center_uncertainty_fraction_of_fwhm=0.30,
+    )
+    center_consistent = (
+        abs(fit.center_mhz - coarse_fit.center_mhz)
+        <= max(float(coarse_fit.parameters["fwhm_mhz"]), float(np.median(np.diff(coarse))))
+    )
+    width_reduced = (
+        float(fit.parameters["fwhm_mhz"])
+        <= 0.70 * float(coarse_fit.parameters["fwhm_mhz"])
+    )
+    passed = bool(fit_pass and center_consistent and width_reduced)
+    gates = {
+        "r_squared": _gate(fit.statistics["r_squared"], ">= 0.50", fit.statistics["r_squared"] >= 0.50),
+        "contrast_snr": _gate(fit.statistics["contrast_snr"], ">= 3", fit.statistics["contrast_snr"] >= 3),
+        "single_feature": _gate(
+            {
+                "delta_bic_two_vs_one": fit.statistics[
+                    "delta_bic_two_vs_one"
+                ],
+                "two_feature_resolved": fit.statistics[
+                    "two_feature_resolved"
+                ],
+            },
+            "no resolved two-feature BIC win",
+            not fit.statistics["multi_feature"],
+        ),
+        "parameters_not_pinned": _gate(
+            fit.statistics.get("pinned_parameters", []),
+            "empty",
+            not fit.statistics.get("pinned_parameters"),
+        ),
+        "center_uncertainty_over_fwhm": _gate(
+            fit.statistics["center_uncertainty_fraction_of_fwhm"],
+            "<= 0.30",
+            fit.statistics["center_uncertainty_fraction_of_fwhm"] <= 0.30,
+        ),
+        "coarse_fine_center_consistent": _gate(
+            abs(fit.center_mhz - coarse_fit.center_mhz),
+            "<= coarse FWHM or one coarse bin",
+            center_consistent,
+        ),
+        "fine_not_broader_than_coarse": _gate(
+            fit.parameters["fwhm_mhz"] / coarse_fit.parameters["fwhm_mhz"],
+            "<= 0.70",
+            width_reduced,
+        ),
+    }
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=fine_csv,
+        gates=gates,
+        passed=passed,
+        reason="coarse-to-fine qubit feature passed" if passed else "qubit fine-fit evidence failed",
+    )
+    if not passed:
+        return NodeOutcome("retake", "qubit spectroscopy evidence failed", {}, last_csv=str(fine_csv), gates=gates)
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records={"defaults.q_freq": _spectroscopy_record(fit, ctx.z_gain)},
+        gates_pass=True,
+        gate_table=gates,
+    )
+    return NodeOutcome("done", "qubit frequency fitted coarse-to-fine", values, proposals, str(fine_csv), gates)
+
+
+def _n8(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    _completed, _planned, csv_path = _acquire(
+        ctx,
+        node_id=spec.node_id,
+        experiment="rabi",
+        preset="rabi_length",
+        overrides={
+            "q_freq": float(ctx.working_value("defaults.q_freq", 5606.5)),
+            "q_length": np.linspace(0.02, 1.67, 34),
+            "hard_avg": _averaging_value(
+                ctx,
+                "rabi_length",
+                attempt,
+            ),
+        },
+    )
+    fit = fit_rabi(csv_path, variable="q_length")
+    fit_passed = fit.passes(
+        minimum_r_squared=0.70,
+        minimum_oscillations=1.0,
+        maximum_relative_pi_uncertainty=0.25,
+    )
+    consistency = pi_consistency(fit)
+    contrast_passed = (
+        consistency["measured_contrast_at_pi"] >= 0.60
+    )
+    odd_multiple_passed = bool(consistency["odd_multiple_consistent"])
+    passed = bool(
+        fit_passed and contrast_passed and odd_multiple_passed
+    )
+    gates = {
+        "r_squared": _gate(fit.statistics["r_squared"], ">= 0.70", fit.statistics["r_squared"] >= 0.70),
+        "oscillations": _gate(fit.statistics["oscillations"], ">= 1", fit.statistics["oscillations"] >= 1),
+        "relative_pi_uncertainty": _gate(
+            fit.statistics["relative_pi_uncertainty"],
+            "<= 0.25",
+            fit.statistics["relative_pi_uncertainty"] <= 0.25,
+        ),
+        "pi_inside_sweep": _gate(
+            fit.pi_value,
+            "inside acquired q_length axis",
+            float(np.min(fit.x)) <= fit.pi_value <= float(np.max(fit.x)),
+        ),
+        "measured_contrast_at_pi": _gate(
+            consistency["measured_contrast_at_pi"],
+            ">= 0.60",
+            contrast_passed,
+        ),
+        "pi_to_odd_half_period": _gate(
+            consistency["pi_to_half_period_ratio"],
+            "within 0.15 of an odd integer",
+            odd_multiple_passed,
+        ),
+    }
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=csv_path,
+        gates=gates,
+        passed=passed,
+        reason="Rabi pi gates passed" if passed else "Rabi retake needed",
+    )
+    if not passed:
+        return NodeOutcome("retake", "Rabi fit gates failed", {}, last_csv=str(csv_path), gates=gates)
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records={"defaults.q_length": rabi_calibration_record(fit)},
+        gates_pass=True,
+        gate_table=gates,
+    )
+    return NodeOutcome("done", "pi length fitted", values, proposals, str(csv_path), gates)
+
+
+def _n9(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    shots = 2000 * (2 if attempt > 1 else 1)
+    _completed, _planned, csv_path = _acquire(
+        ctx,
+        node_id=spec.node_id,
+        experiment="iq_blobs",
+        preset="iq_blobs",
+        overrides={
+            "shots": shots,
+            "q_freq": float(ctx.working_value("defaults.q_freq", 5606.5)),
+            "q_length": float(ctx.working_value("defaults.q_length", 0.115)),
+            "r_freq": float(ctx.working_value("defaults.r_freq", 6883.11)),
+            "r_power": float(ctx.working_value("defaults.r_power", -35.0)),
+        },
+    )
+    source, _metadata, arrays = load_iq_shots(csv_path)
+    fit = fit_iq_gmm(*arrays)
+    passed = fit.passes(
+        minimum_fidelity=0.80,
+        minimum_shots_per_state=2000,
+        maximum_angle_bootstrap_std=0.20,
+    )
+    gates = {
+        "assignment_fidelity": _gate(fit.assignment_fidelity, ">= 0.80", fit.assignment_fidelity >= 0.80),
+        "shots_per_state": _gate(fit.shots_per_state, ">= 2000", fit.shots_per_state >= 2000),
+        "rotation_stability": _gate(fit.rotation_stability, "<= 0.20", fit.rotation_stability <= 0.20),
+        "gmm_beats_centroid": _gate(
+            fit.cross_validated_fidelity - fit.cross_validated_baseline_fidelity,
+            ">= -0.001",
+            fit.cross_validated_fidelity >= fit.cross_validated_baseline_fidelity - 0.001,
+        ),
+    }
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=csv_path,
+        gates=gates,
+        passed=passed,
+        reason="IQ discrimination gates passed" if passed else "IQ discrimination retake needed",
+    )
+    if not passed:
+        status = "blocked" if fit.assignment_fidelity < 0.60 else "retake"
+        return NodeOutcome(status, "IQ discrimination gates failed", {}, last_csv=str(csv_path), gates=gates)
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records=iq_calibration_records(fit, source),
+        gates_pass=True,
+        gate_table=gates,
+    )
+    return NodeOutcome("done", "IQ threshold and fidelity fitted", values, proposals, str(csv_path), gates)
+
+
+def _n10r(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    fidelity = float(ctx.working_value("derived.readout_fidelity", 0.0))
+    if fidelity >= 0.80:
+        return NodeOutcome(
+            "done",
+            "readout optimization skipped because fidelity already meets target",
+            {"derived.readout_fidelity": fidelity},
+        )
+    return NodeOutcome(
+        "blocked",
+        "fidelity is below target; N10r proposals require a supervised hardware search",
+        {},
+    )
+
+
+def _n11(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    stop = 29.9 if attempt == 1 else 59.8
+    _completed, _planned, csv_path = _acquire(
+        ctx,
+        node_id=spec.node_id,
+        experiment="t1",
+        preset="t1",
+        overrides={
+            "delay": np.linspace(0.0, stop, 300),
+            "q_freq": float(ctx.working_value("defaults.q_freq", 5606.5)),
+            "q_length": float(ctx.working_value("defaults.q_length", 0.115)),
+            "hard_avg": _averaging_value(ctx, "t1", attempt),
+        },
+        run_options={"population": False},
+    )
+    fit = fit_t1(csv_path, signal="IQ")
+    passed = fit.passes(
+        minimum_r_squared=0.70,
+        minimum_span_over_t1=0.75,
+        maximum_relative_t1_uncertainty=0.25,
+    )
+    gates = {
+        "r_squared": _gate(fit.statistics["r_squared"], ">= 0.70", fit.statistics["r_squared"] >= 0.70),
+        "span_over_t1": _gate(fit.statistics["span_over_t1"], ">= 0.75", fit.statistics["span_over_t1"] >= 0.75),
+        "relative_t1_uncertainty": _gate(
+            fit.statistics["relative_t1_uncertainty"],
+            "<= 0.25",
+            fit.statistics["relative_t1_uncertainty"] <= 0.25,
+        ),
+    }
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=csv_path,
+        gates=gates,
+        passed=passed,
+        reason="T1 gates passed" if passed else "T1 delay span needs a retake",
+    )
+    if not passed:
+        return NodeOutcome("retake", "T1 fit gates failed", {}, last_csv=str(csv_path), gates=gates)
+    record = _record(
+        value=fit.t1_us,
+        unit="us",
+        source_csv=csv_path,
+        analysis="quickexp_v3.native_fit.fit_t1",
+        quality=fit.statistics,
+        uncertainty={"t1_us": fit.parameters["t1_uncertainty_us"]},
+        valid_domain={"z_gain": [ctx.z_gain, ctx.z_gain]},
+        model="bounded_exponential",
+    )
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records={"derived.t1": record},
+        gates_pass=True,
+        gate_table=gates,
+    )
+    return NodeOutcome("done", "T1 fitted", values, proposals, str(csv_path), gates)
+
+
+def _ramsey_record(fit: Any, *, value: float, analysis: str) -> dict:
+    return _record(
+        value=value,
+        unit="us" if "t2" in analysis else "MHz",
+        source_csv=fit.source_csv,
+        analysis="quickexp_v3.native_fit.fit_ramsey",
+        quality=fit.statistics,
+        uncertainty={
+            "t2_star_us": fit.parameters["t2_star_uncertainty_us"],
+            "fringe_mhz": fit.parameters["fitted_fringe_uncertainty_mhz"],
+        },
+        valid_domain={
+            "z_gain": [
+                float(
+                    fit.metadata.get("parameters", {})
+                    .get("var", {})
+                    .get("z_gain", 0.0)
+                )
+            ]
+            * 2
+        },
+        model=analysis,
+    )
+
+
+def _n12(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    working = float(ctx.working_value("defaults.q_freq", 5606.5))
+    drives = (working + 0.5, working + 1.5)
+    fits = []
+    csv_paths = []
+    for index, drive in enumerate(drives):
+        _completed, _planned, csv_path = _acquire(
+            ctx,
+            node_id=spec.node_id,
+            experiment="ramsey",
+            preset="ramsey",
+            overrides={
+                "q_freq": drive,
+                "fringe_frequency_mhz": 5.0,
+                "delay": np.linspace(0.0, 4.99, 500),
+                "q_length": float(ctx.working_value("defaults.q_length", 0.115)),
+                "q_length_2": float(ctx.working_value("defaults.q_length", 0.115)),
+                "hard_avg": _averaging_value(ctx, "ramsey", attempt),
+            },
+            run_options={"population": False},
+        )
+        fits.append(fit_ramsey(csv_path, signal="IQ"))
+        csv_paths.append(csv_path)
+    individual = [
+        fit.passes(
+            minimum_r_squared=0.70,
+            minimum_oscillations=1.0,
+            maximum_relative_t2_uncertainty=0.30,
+        )
+        for fit in fits
+    ]
+    frequencies = [float(fit.parameters["fitted_fringe_mhz"]) for fit in fits]
+    sign_confirmed = bool(frequencies[1] < frequencies[0])
+    passed = bool(all(individual) and sign_confirmed)
+    gates = {
+        "first_r_squared": _gate(fits[0].statistics["r_squared"], ">= 0.70", fits[0].statistics["r_squared"] >= 0.70),
+        "second_r_squared": _gate(fits[1].statistics["r_squared"], ">= 0.70", fits[1].statistics["r_squared"] >= 0.70),
+        "first_oscillations": _gate(fits[0].statistics["oscillations"], ">= 1", fits[0].statistics["oscillations"] >= 1),
+        "second_oscillations": _gate(fits[1].statistics["oscillations"], ">= 1", fits[1].statistics["oscillations"] >= 1),
+        "first_relative_t2_uncertainty": _gate(
+            fits[0].statistics["relative_t2_uncertainty"],
+            "<= 0.30",
+            fits[0].statistics["relative_t2_uncertainty"] <= 0.30,
+        ),
+        "second_relative_t2_uncertainty": _gate(
+            fits[1].statistics["relative_t2_uncertainty"],
+            "<= 0.30",
+            fits[1].statistics["relative_t2_uncertainty"] <= 0.30,
+        ),
+        "detuning_sign_confirmed": _gate(
+            frequencies[0] - frequencies[1],
+            "> 0 when drive is increased",
+            sign_confirmed,
+        ),
+    }
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=csv_paths[-1],
+        gates=gates,
+        passed=passed,
+        reason="two-point Ramsey sign confirmed" if passed else "Ramsey sign protocol failed",
+    )
+    if not passed:
+        return NodeOutcome("retake", "Ramsey sign confirmation failed", {}, last_csv=str(csv_paths[-1]), gates=gates)
+    second = fits[1]
+    corrected_q = float(
+        second.parameters["drive_frequency_mhz"]
+        + second.parameters["detuning_mhz"]
+    )
+    records = {
+        "derived.t2_ramsey": _ramsey_record(
+            second,
+            value=second.t2_star_us,
+            analysis="decaying_cosine_t2",
+        ),
+        "defaults.q_freq": _ramsey_record(
+            second,
+            value=corrected_q,
+            analysis="ramsey_fringe_frequency_correction",
+        ),
+    }
+    records["defaults.q_freq"]["unit"] = "MHz"
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records=records,
+        gates_pass=True,
+        gate_table=gates,
+        ramsey_sign_confirmed=True,
+    )
+    return NodeOutcome("done", "Ramsey T2* and detuning sign fitted", values, proposals, str(csv_paths[-1]), gates)
+
+
+def _n13(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    stop = 49.0 if attempt == 1 else 98.0
+    _completed, _planned, csv_path = _acquire(
+        ctx,
+        node_id=spec.node_id,
+        experiment="echo",
+        preset="echo",
+        overrides={
+            "delay": np.linspace(0.0, stop, 99),
+            "pulse_count": 0,
+            "q_freq": float(ctx.working_value("defaults.q_freq", 5606.5)),
+            "q_length": float(ctx.working_value("defaults.q_length", 0.115)),
+            "q_length_2": float(ctx.working_value("defaults.q_length", 0.115)),
+            "hard_avg": _averaging_value(ctx, "echo", attempt),
+        },
+        run_options={"population": False},
+    )
+    fit = fit_echo(csv_path, signal="IQ", bootstrap_resamples=20)
+    passed = fit.passes(
+        minimum_r_squared=0.70,
+        minimum_span_over_t=0.75,
+        maximum_relative_t_uncertainty=0.25,
+    )
+    gates = {
+        "r_squared": _gate(fit.statistics["r_squared"], ">= 0.70", fit.statistics["r_squared"] >= 0.70),
+        "span_over_decay": _gate(fit.statistics["span_over_decay"], ">= 0.75", fit.statistics["span_over_decay"] >= 0.75),
+        "relative_decay_uncertainty": _gate(
+            fit.statistics["relative_decay_uncertainty"],
+            "<= 0.25",
+            fit.statistics["relative_decay_uncertainty"] <= 0.25,
+        ),
+        "parameters_not_pinned": _gate(
+            fit.statistics.get("pinned_parameters", []),
+            "empty",
+            not fit.statistics.get("pinned_parameters"),
+        ),
+        "exponent_not_pinned": _gate(
+            fit.statistics.get("n_pinned", False),
+            "false",
+            not fit.statistics.get("n_pinned", False),
+        ),
+    }
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=csv_path,
+        gates=gates,
+        passed=passed,
+        reason="echo gates passed" if passed else "echo span/model retake needed",
+    )
+    if not passed:
+        return NodeOutcome("retake", "echo fit gates failed", {}, last_csv=str(csv_path), gates=gates)
+    record = echo_calibration_record(fit)
+    record["valid_domain"] = {"z_gain": [ctx.z_gain, ctx.z_gain]}
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records={"derived.t2_echo.cycle_0": record},
+        gates_pass=True,
+        gate_table=gates,
+    )
+    return NodeOutcome("done", "echo fitted", values, proposals, str(csv_path), gates)
+
+
+_HANDLERS: Mapping[str, Callable[[SessionContext, NodeSpec, int], NodeOutcome]] = {
+    "N0": _n0,
+    "N1": _n1,
+    "N2": _n2,
+    "N3": _n3,
+    "N4": _n4,
+    "N5": _n5,
+    "N8": _n8,
+    "N9": _n9,
+    "N10r": _n10r,
+    "N11": _n11,
+    "N12": _n12,
+    "N13": _n13,
+}
+
+
+def run_node(
+    ctx: SessionContext,
+    spec: NodeSpec,
+    *,
+    attempt: int,
+) -> NodeOutcome:
+    """Execute one node attempt through its registered launcher-grade path."""
+    handler = _HANDLERS.get(spec.node_id)
+    if handler is None:
+        return NodeOutcome(
+            "skipped" if spec.optional else "blocked",
+            f"{spec.node_id} is not implemented in the v1 offline graph",
+            {},
+        )
+    return handler(ctx, spec, int(attempt))

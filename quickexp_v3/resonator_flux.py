@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date
-import os
 from pathlib import Path
-import tempfile
 from typing import Any, Mapping, Optional, Union
 
 import matplotlib.patheffects as path_effects
@@ -15,10 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import least_squares
-import yaml
-
-from .config import ConfigRepository, SCHEMA_VERSION
 from .errors import AnalysisError, ConfigError
+from .fit_calibration import write_calibration_records
 from .util import to_builtin, utc_now
 
 
@@ -572,34 +566,6 @@ def calibration_record(fit: ResonatorFluxFit) -> dict:
     }
 
 
-def _atomic_yaml(path: Path, document: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=str(path.parent),
-    )
-    try:
-        with os.fdopen(
-            descriptor,
-            "w",
-            encoding="utf-8",
-            newline="\n",
-        ) as handle:
-            yaml.safe_dump(
-                to_builtin(document),
-                handle,
-                sort_keys=False,
-                allow_unicode=True,
-            )
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_name, path)
-    finally:
-        if os.path.exists(temporary_name):
-            os.unlink(temporary_name)
-
-
 def accept_fit(
     project_root: Path,
     fit: ResonatorFluxFit,
@@ -620,46 +586,9 @@ def accept_fit(
             f"(maximum {maximum_rmse_mhz} MHz)"
         )
 
-    root = Path(project_root).resolve()
-    target = root / "calibration.yml"
-    source = target if target.exists() else root / "calibration.example.yml"
-    loaded = yaml.safe_load(source.read_text(encoding="utf-8"))
-    if not isinstance(loaded, Mapping):
-        raise ConfigError(f"{source} must contain a YAML mapping")
-    document = deepcopy(dict(loaded))
-    if document.get("schema_version") != SCHEMA_VERSION:
-        raise ConfigError(
-            f"calibration schema_version must be {SCHEMA_VERSION}"
-        )
-
-    records = document.setdefault("records", {})
-    lookups = records.setdefault("lookups", {})
-    previous = deepcopy(lookups.get("resonator_vs_flux"))
-    lookups["resonator_vs_flux"] = calibration_record(fit)
-    if previous is not None:
-        document.setdefault("history", []).append(
-            {
-                "record": "lookups.resonator_vs_flux",
-                "superseded_at": utc_now(),
-                "previous": previous,
-            }
-        )
-    document["revision"] = int(document.get("revision", 0)) + 1
-    document["updated_at"] = date.today().isoformat()
-
-    repository = ConfigRepository.from_files(
-        root / "hardware.yml"
-        if (root / "hardware.yml").exists()
-        else root / "hardware.example.yml",
-        None,
-        root / "presets.yml"
-        if (root / "presets.yml").exists()
-        else root / "presets.example.yml",
+    return write_calibration_records(
+        project_root,
+        {
+            "lookups.resonator_vs_flux": calibration_record(fit),
+        },
     )
-    ConfigRepository(
-        repository.hardware,
-        document,
-        {"schema_version": SCHEMA_VERSION, "presets": repository.presets},
-    )
-    _atomic_yaml(target, document)
-    return target

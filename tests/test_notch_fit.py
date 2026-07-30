@@ -93,6 +93,31 @@ def test_two_feature_selection_requires_explicit_window(tmp_path):
         minimum_contrast_snr=3.0,
         maximum_center_uncertainty_fraction_of_fwhm=0.3,
     )
+    amplitude_fit = fit_spectroscopy_features(
+        source,
+        signal="amplitude",
+    )
+    assert amplitude_fit.statistics["multi_feature"]
+
+
+def test_overlapping_two_component_bic_gain_is_not_two_features(tmp_path):
+    frequency = np.linspace(5590.0, 5610.0, 401)
+    signal = (
+        0.1
+        + 1.0 / (1.0 + ((frequency - 5600.0) / 0.8) ** 2)
+        + 0.15 / (1.0 + ((frequency - 5600.2) / 2.5) ** 2)
+    )
+    source = write_pair(
+        tmp_path / "overlap.csv",
+        quick_class="QubitSpectroscopy",
+        axis_label="Qubit Pulse Frequency",
+        axis_unit="MHz",
+        x=frequency,
+        signal=signal,
+    )
+    fit = fit_spectroscopy_features(source, signal="amplitude")
+    assert not fit.statistics["multi_feature"]
+    assert not fit.statistics["two_feature_resolved"]
 
 
 @pytest.mark.skipif(not REAL_ROOT.exists(), reason="local real-data mirror absent")
@@ -106,4 +131,3 @@ def test_real_notches_reproduce_named_features():
         REAL_ROOT / "00019 - (ResonatorSpectroscopy)VNA-test.csv"
     )
     assert neighbor.center_mhz == pytest.approx(6817.6, abs=0.1)
-

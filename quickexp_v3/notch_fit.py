@@ -571,7 +571,8 @@ def fit_spectroscopy_features(
         axis_text=definition["axis_text"],
         minimum_points=12,
     )
-    if str(signal).upper() != "IQ":
+    normalized_signal = str(signal).strip().lower()
+    if normalized_signal not in {"iq", "amplitude"}:
         legacy = fit_spectroscopy(
             csv_path,
             kind=normalized_kind,
@@ -587,15 +588,37 @@ def fit_spectroscopy_features(
         x, iq = x[mask], iq[mask]
         if x.size < 12:
             raise AnalysisError("spectroscopy fit window contains fewer than 12 points")
-    measured, rotation = oriented_rotate_iq(iq)
-    measured = np.asarray(measured, dtype=float)
+    if normalized_signal == "iq":
+        measured, rotation = oriented_rotate_iq(iq)
+        measured = np.asarray(measured, dtype=float)
+        signal_name = "IQ"
+        signal_label = "Oriented I/Q principal-axis projection (a.u.)"
+    else:
+        measured = np.asarray(np.abs(iq), dtype=float)
+        rotation = {"angle_rad": float("nan"), "flipped": False}
+        signal_name = "amplitude"
+        signal_label = "Amplitude (a.u.)"
     one = _fit_lorentz_components(x, measured, 1)
     two = _fit_lorentz_components(x, measured, 2)
     rss_one = float(np.sum((measured - one[2]) ** 2))
     rss_two = float(np.sum((measured - two[2]) ** 2))
     delta_bic = bic(rss_one, x.size, 5) - bic(rss_two, x.size, 8)
-    selected = two if delta_bic > 10.0 else one
-    components = 2 if delta_bic > 10.0 else 1
+    two_values = two[0]
+    two_center_separation = abs(
+        float(two_values[3]) - float(two_values[6])
+    )
+    two_resolution_floor = max(
+        3.0 * float(np.median(np.diff(x))),
+        0.5
+        * (
+            abs(float(two_values[4]))
+            + abs(float(two_values[7]))
+        ),
+    )
+    two_feature_resolved = two_center_separation >= two_resolution_floor
+    use_two = bool(delta_bic > 10.0 and two_feature_resolved)
+    selected = two if use_two else one
+    components = 2 if use_two else 1
     values, covariance, fitted, lower, upper = selected
     errors = np.sqrt(np.maximum(np.diag(covariance), 0.0))
     features = []
@@ -639,6 +662,13 @@ def fit_spectroscopy_features(
         "edge_distance_mhz": min(primary["center_mhz"] - x[0], x[-1] - primary["center_mhz"]),
         "multi_feature": components == 2,
         "delta_bic_two_vs_one": float(delta_bic),
+        "two_feature_center_separation_mhz": float(
+            two_center_separation
+        ),
+        "two_feature_resolution_floor_mhz": float(
+            two_resolution_floor
+        ),
+        "two_feature_resolved": bool(two_feature_resolved),
         "residual_ripple_fraction": residual_ripple_fraction(x, measured - fitted),
         "ripple_suspected": residual_ripple_fraction(x, measured - fitted) > 0.3,
         "pinned_parameters": pinned,
@@ -649,8 +679,8 @@ def fit_spectroscopy_features(
         source_csv=trace.source_csv,
         source_yml=trace.source_yml,
         kind=normalized_kind,
-        signal="IQ",
-        signal_label="Oriented I/Q principal-axis projection (a.u.)",
+        signal=signal_name,
+        signal_label=signal_label,
         x=x,
         iq=iq,
         measured=measured,

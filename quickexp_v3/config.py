@@ -39,6 +39,7 @@ PROTECTED_ROOTS = frozenset(
         "flux_lines",
         "limits",
         "safety",
+        "autocal",
         "expected",
     }
 )
@@ -263,6 +264,178 @@ def _validate_hardware(document: Mapping[str, Any]) -> None:
             raise ConfigError(
                 f"hardware.channels.{logical}.{endpoint} cannot be negative"
             )
+    _validate_autocal_policy(
+        document.get("autocal"),
+        limits=document["limits"],
+    )
+
+
+def _validate_autocal_policy(
+    value: Any,
+    *,
+    limits: Mapping[str, Any],
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise ConfigError("hardware.autocal must be a mapping")
+    allowed_roots = {
+        "hard_stop_records",
+        "auto_accept",
+        "budgets",
+        "caps",
+        "ramsey_sign",
+    }
+    unknown_roots = set(value).difference(allowed_roots)
+    if unknown_roots:
+        raise ConfigError(
+            "hardware.autocal has unknown keys: "
+            + ", ".join(sorted(unknown_roots))
+        )
+    hard_stops = value.get("hard_stop_records", [])
+    if (
+        not isinstance(hard_stops, list)
+        or any(not isinstance(item, str) or not item for item in hard_stops)
+    ):
+        raise ConfigError(
+            "hardware.autocal.hard_stop_records must be a list of addresses"
+        )
+    tolerances = value.get("auto_accept", {})
+    if not isinstance(tolerances, Mapping):
+        raise ConfigError("hardware.autocal.auto_accept must be a mapping")
+    allowed_tolerances = {
+        "absolute_mhz",
+        "absolute_db",
+        "absolute",
+        "relative",
+        "always",
+    }
+    for address, tolerance in tolerances.items():
+        if not isinstance(address, str) or not address:
+            raise ConfigError("autocal auto_accept addresses must be strings")
+        if not isinstance(tolerance, Mapping) or len(tolerance) != 1:
+            raise ConfigError(
+                f"hardware.autocal.auto_accept.{address} must contain "
+                "exactly one tolerance"
+            )
+        kind, amount = next(iter(tolerance.items()))
+        if kind not in allowed_tolerances:
+            raise ConfigError(
+                f"hardware.autocal.auto_accept.{address} has unknown "
+                f"tolerance {kind!r}"
+            )
+        if kind == "always":
+            if amount is not True:
+                raise ConfigError(
+                    f"hardware.autocal.auto_accept.{address}.always must be true"
+                )
+        elif _finite_number(
+            amount,
+            f"hardware.autocal.auto_accept.{address}.{kind}",
+        ) < 0:
+            raise ConfigError(
+                f"hardware.autocal.auto_accept.{address}.{kind} "
+                "cannot be negative"
+            )
+    budgets = value.get("budgets", {})
+    if not isinstance(budgets, Mapping):
+        raise ConfigError("hardware.autocal.budgets must be a mapping")
+    allowed_budgets = {
+        "max_wall_clock_hours",
+        "max_node_attempts",
+        "max_total_runs",
+    }
+    if set(budgets).difference(allowed_budgets):
+        raise ConfigError("hardware.autocal.budgets has unknown keys")
+    for name, amount in budgets.items():
+        number = _finite_number(
+            amount,
+            f"hardware.autocal.budgets.{name}",
+        )
+        if number <= 0:
+            raise ConfigError(
+                f"hardware.autocal.budgets.{name} must be positive"
+            )
+        if (
+            name in {"max_node_attempts", "max_total_runs"}
+            and not number.is_integer()
+        ):
+            raise ConfigError(
+                f"hardware.autocal.budgets.{name} must be an integer"
+            )
+    caps = value.get("caps", {})
+    if not isinstance(caps, Mapping):
+        raise ConfigError("hardware.autocal.caps must be a mapping")
+    allowed_caps = {"q_gain_max", "r_power_max_db"}
+    if set(caps).difference(allowed_caps):
+        raise ConfigError("hardware.autocal.caps has unknown keys")
+    if "q_gain_max" in caps:
+        q_gain_max = _finite_number(
+            caps["q_gain_max"],
+            "hardware.autocal.caps.q_gain_max",
+        )
+        if q_gain_max <= 0:
+            raise ConfigError(
+                "hardware.autocal.caps.q_gain_max must be positive"
+            )
+        q_gain_limits = limits.get("q_gain")
+        if (
+            isinstance(q_gain_limits, Sequence)
+            and not isinstance(q_gain_limits, (str, bytes))
+            and len(q_gain_limits) == 2
+        ):
+            lower = _finite_number(
+                q_gain_limits[0],
+                "limits.q_gain[0]",
+            )
+            upper = _finite_number(
+                q_gain_limits[1],
+                "limits.q_gain[1]",
+            )
+            if lower > -q_gain_max or upper < q_gain_max:
+                raise ConfigError(
+                    "hardware.autocal.caps.q_gain_max does not fit symmetrically "
+                    "inside hardware.limits.q_gain"
+                )
+    if "r_power_max_db" in caps:
+        r_power_max = _finite_number(
+            caps["r_power_max_db"],
+            "hardware.autocal.caps.r_power_max_db",
+        )
+        if r_power_max > 0:
+            raise ConfigError(
+                "hardware.autocal.caps.r_power_max_db cannot be positive"
+            )
+        r_power_limits = limits.get("r_power")
+        if (
+            isinstance(r_power_limits, Sequence)
+            and not isinstance(r_power_limits, (str, bytes))
+            and len(r_power_limits) == 2
+        ):
+            lower = _finite_number(
+                r_power_limits[0],
+                "limits.r_power[0]",
+            )
+            upper = _finite_number(
+                r_power_limits[1],
+                "limits.r_power[1]",
+            )
+            if not lower <= r_power_max <= upper:
+                raise ConfigError(
+                    "hardware.autocal.caps.r_power_max_db is outside "
+                    "hardware.limits.r_power"
+                )
+    ramsey = value.get("ramsey_sign", {})
+    if not isinstance(ramsey, Mapping):
+        raise ConfigError("hardware.autocal.ramsey_sign must be a mapping")
+    if set(ramsey).difference({"require_two_point_confirmation"}):
+        raise ConfigError("hardware.autocal.ramsey_sign has unknown keys")
+    confirmation = ramsey.get("require_two_point_confirmation", True)
+    if not isinstance(confirmation, bool):
+        raise ConfigError(
+            "hardware.autocal.ramsey_sign.require_two_point_confirmation "
+            "must be boolean"
+        )
 
 
 def _validate_limits(parameters: Mapping[str, Any], limits: Mapping[str, Any]) -> None:

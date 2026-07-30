@@ -165,6 +165,31 @@ safety:
   require_reviewed_flux_controller: true
   park_flux_on_exit: true
 
+autocal:
+  hard_stop_records:
+    - defaults.r_offset
+    - lookups.resonator_vs_flux
+    - lookups.qubit_vs_flux
+  auto_accept:
+    defaults.r_freq: {absolute_mhz: 0.5}
+    defaults.q_freq: {absolute_mhz: 1.0}
+    defaults.q_length: {relative: 0.15}
+    defaults.q_gain: {relative: 0.15}
+    defaults.r_power: {absolute_db: 3.0}
+    defaults.r_threshold: {always: true}
+    derived.t1: {always: true}
+    derived.t2_ramsey: {always: true}
+    derived.t2_echo: {always: true}
+  budgets:
+    max_wall_clock_hours: 8.0
+    max_node_attempts: 3
+    max_total_runs: 200
+  caps:
+    q_gain_max: 0.8
+    r_power_max_db: -20.0
+  ramsey_sign:
+    require_two_point_confirmation: true
+
 expected:
   r_freq_mhz: [6800.0, 6950.0]
   q_freq_mhz: [3500.0, 6000.0]

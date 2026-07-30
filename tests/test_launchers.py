@@ -42,6 +42,8 @@ EXPECTED = [
     "14b_fit_echo.py",
     "16_two_photon_spectroscopy.py",
     "90_measurement_queue.py",
+    "91_autocal.py",
+    "92_review_proposals.py",
     "95_device_report.py",
 ]
 

@@ -86,6 +86,7 @@ def test_flux_saver_records_all_fitted_readouts_and_provenance(
         "model": "cosine",
         "provenance": {"source": "test ResVsZ CSV"},
     }
+    callbacks = []
     rows = ide.run_flux_sweep(
         ROOT,
         experiment="qubit_spectroscopy",
@@ -100,6 +101,12 @@ def test_flux_saver_records_all_fitted_readouts_and_provenance(
         },
         live_hardware=True,
         show_plot=False,
+        before_row=lambda index, value: callbacks.append(
+            ("before", index, value)
+        ),
+        after_row=lambda index, value, completed: callbacks.append(
+            ("after", index, value, completed.status)
+        ),
     )
 
     saver = FakeSaver.instance
@@ -115,3 +122,11 @@ def test_flux_saver_records_all_fitted_readouts_and_provenance(
     assert len(rows) == len(z_gain)
     assert flux.values == [-0.1, 0.0, 0.1]
     assert flux.parked is True
+    assert callbacks == [
+        ("before", 0, -0.1),
+        ("after", 0, -0.1, "completed"),
+        ("before", 1, 0.0),
+        ("after", 1, 0.0, "completed"),
+        ("before", 2, 0.1),
+        ("after", 2, 0.1, "completed"),
+    ]

@@ -365,10 +365,11 @@ def generate_device_report(
             ]
         )
         for address, proposal in proposal_rows:
+            target_address = str(proposal.get("record", address))
             lines.append(
-                f"| {address} | {proposal.get('proposal_id', '—')} | "
+                f"| {target_address} | {proposal.get('proposal_id', '—')} | "
                 f"{proposal.get('status', 'open')} | "
-                f"{_format_value(proposal.get('record', proposal).get('value'))} |"
+                f"{_format_value(proposal.get('value'))} |"
             )
     else:
         lines.append("_No open proposals._")

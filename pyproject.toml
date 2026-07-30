@@ -29,9 +29,9 @@ include = ["quickexp_v3*"]
   "calibration.example.yml",
   "presets.example.yml",
   "ARCHITECTURE.md",
+  "AUTOCAL.md",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
-

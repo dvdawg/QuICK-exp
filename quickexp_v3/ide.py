@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -224,6 +224,7 @@ def run_experiment(
     analyze: bool = True,
     show_plot: bool = True,
     seed: int = 7,
+    backend: Any = None,
 ) -> CompletedRun:
     repository = load_repository(project_root)
     run_overrides = deepcopy(dict(overrides or {}))
@@ -232,6 +233,8 @@ def run_experiment(
     connection = None
     flux = None
     if live_hardware:
+        if backend is not None:
+            raise ValueError("a custom backend cannot be supplied for live hardware")
         connection = connect_quick(repository)
         backend = connection.backend
         try:
@@ -303,7 +306,7 @@ def run_experiment(
     else:
         print("SIMULATION: LIVE_HARDWARE=False")
         print_offline_channel_expectation(repository)
-        backend = SyntheticBackend(seed=seed)
+        backend = backend if backend is not None else SyntheticBackend(seed=seed)
 
     runner = ExperimentRunner(repository, backend, flux=flux)
     completed = runner.run(
@@ -392,6 +395,11 @@ def run_flux_sweep(
     analyze_rows: bool = False,
     show_plot: bool = True,
     seed: int = 7,
+    backend: Any = None,
+    before_row: Optional[Callable[[int, float], None]] = None,
+    after_row: Optional[
+        Callable[[int, float, Optional[CompletedRun]], None]
+    ] = None,
 ) -> list:
     """Acquire a held-Z map and save one combined native Quick CSV/YML."""
     values = np.asarray(flux_values, dtype=float)
@@ -414,6 +422,8 @@ def run_flux_sweep(
     connection = None
     flux = None
     if live_hardware:
+        if backend is not None:
+            raise ValueError("a custom backend cannot be supplied for live hardware")
         connection = connect_quick(repository)
         backend = connection.backend
         try:
@@ -449,7 +459,7 @@ def run_flux_sweep(
     else:
         print("SIMULATION: LIVE_HARDWARE=False")
         print_offline_channel_expectation(repository)
-        backend = SyntheticBackend(seed=seed)
+        backend = backend if backend is not None else SyntheticBackend(seed=seed)
 
     runner = ExperimentRunner(repository, backend, flux=flux)
     combined_title = title or f"{preset}_vs_Z"
@@ -547,6 +557,8 @@ def run_flux_sweep(
 
         for row_index, value in enumerate(row_values):
             value = float(value)
+            if before_row is not None:
+                before_row(row_index, value)
             row_overrides = deepcopy(base_overrides)
             row_overrides["z_gain"] = value
             row_readout = None
@@ -555,16 +567,21 @@ def run_flux_sweep(
                 row_overrides["r_freq"] = row_readout
             if flux is not None:
                 flux.set(value)
-            completed = runner.run(
-                experiment,
-                preset,
-                overrides=row_overrides,
-                run_options=run_options,
-                title=combined_title,
-                analyze=analyze_rows,
-                close_backend=False,
-                park_flux_on_exit=False,
-            )
+            completed = None
+            try:
+                completed = runner.run(
+                    experiment,
+                    preset,
+                    overrides=row_overrides,
+                    run_options=run_options,
+                    title=combined_title,
+                    analyze=analyze_rows,
+                    close_backend=False,
+                    park_flux_on_exit=False,
+                )
+            finally:
+                if after_row is not None:
+                    after_row(row_index, value, completed)
             completed_rows.append(completed)
             if native_saver is not None:
                 inner_axis = next(iter(completed.data.axes.values()))
