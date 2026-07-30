@@ -63,11 +63,13 @@ keyword. V3 passes each declared axis as a constructor sweep. `hard_avg`,
 activates Quick's native `quick.Sweep` progress display. It also returns the
 exact Saver CSV/YML paths as acquisition metadata.
 
-Before held flux is established, `QuickBackend` validates uploaded Gaussian
-envelopes against the connected q generator's waveform-memory metadata. The
-sample calculation intentionally matches Quick 0.7.2's Mercator conversion,
-including cumulative Ramsey/Echo envelopes. Deterministic `ConfigError`
-failures bypass acquisition recovery and retry.
+Before held flux is established, `QuickBackend` validates uploaded envelopes
+against the connected generator's waveform-memory metadata. Built-in classes
+use the verified legacy table; authored programs attach a style-aware
+`MercatorProgram.preflight` callback covering memory, fabric-clock
+granularity, clipping, mixer continuity, and a sequence-duty warning. The
+sample calculation intentionally matches Quick 0.7.2's Mercator conversion.
+Deterministic `ConfigError` failures bypass acquisition recovery and retry.
 
 Native Cartesian sweeps power the resonator punchout, qubit-gain scan, and
 Rabi/Ramsey chevrons. Flux remains an outer loop because generator 15 must be
@@ -102,5 +104,31 @@ native 2D experiment rather than special-casing resonator power.
 5. Compile and run tests with the Python 3.9 `qcodes` interpreter before
    enabling hardware.
 
-Custom notebook programs such as `T1_zpa` and `TwoTone_ZPA` require dedicated
-adapters/templates and must not be routed through an unrelated Quick class.
+## Adding an authored Mercator program
+
+`mercator.py` is deliberately a thin, key-validating builder for the observed
+Quick schema; it is not a second pulse compiler. `TwoTone_ZPA` and `T1_zpa`
+are the worked examples.
+
+1. Define `PROGRAM` under `quickexp_v3/programs/` with declared variables,
+   labels, pulses/readout/steps, and every non-constant envelope term.
+2. Export it from `programs/__init__.py`. That registers its constructor
+   variables and envelope terms without mutating the seed tables. Configuration
+   controls `hard_avg`, `soft_avg`, and `rep` are rejected as program variables.
+3. Add a dedicated adapter, set `quick_class = PROGRAM.name`, attach
+   `PROGRAM.preflight` to plan metadata, and register the adapter explicitly.
+4. `lab.install_authored_programs` installs all authored templates immediately
+   after the Quick version check. Installation is additive and idempotent.
+5. Add matching conservative presets, a numbered launcher, a coherent
+   `SyntheticBackend` branch, fake-Quick sweep/config routing coverage, and an
+   offline launcher test.
+6. Run the parity and full test suites. On the lab machine, perform a three-point
+   smoke and diff the native sidecar's resolved config against the rendered
+   template before scaling a sweep.
+
+The current offline implementation reconstructs the held-Z template and seven
+real Quick sidecars key-for-key. Live enablement remains intentionally off in
+the two authored launchers until hardware gates G1–G4 in
+`plans/20-pulses.md` are completed. In particular, the flat-top RAM cost still
+uses the conservative observed `8σ` ramp assumption and reports that assumption
+at preflight.

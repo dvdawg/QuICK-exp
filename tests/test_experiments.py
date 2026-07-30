@@ -30,6 +30,8 @@ def test_registry_has_explicit_standard_and_chevron_adapters():
         "ramsey_chevron",
         "resonator_spectroscopy",
         "t1",
+        "t1_zpa",
+        "two_tone_zpa",
     ]
 
 

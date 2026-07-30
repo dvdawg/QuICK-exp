@@ -8,7 +8,11 @@ from typing import Any, Mapping, Optional
 
 import numpy as np
 
-from .backend import QuickBackend, clean_qick_acquisition_state
+from .backend import (
+    QuickBackend,
+    clean_qick_acquisition_state,
+    logical_channel_variables,
+)
 from .config import ConfigRepository
 from .errors import ConfigError, SafetyError
 from .ports import errors as port_errors
@@ -170,6 +174,11 @@ def connect_quick(
             f"but this interpreter has {actual_version}"
         )
     print(f"Using Quick {actual_version}.")
+    if hasattr(quick, "experiment"):
+        install_authored_programs(
+            quick,
+            channel_variables=logical_channel_variables(repository.hardware),
+        )
     progress_binding = configure_quick_progress(
         quick,
         qick.get("progress_mode", "terminal"),
@@ -266,6 +275,25 @@ def install_held_z_experiment(quick_module: Any):
     SetZBiasAndWaitV3.__name__ = HELD_Z_EXPERIMENT_NAME
     setattr(quick_module.experiment, HELD_Z_EXPERIMENT_NAME, SetZBiasAndWaitV3)
     return SetZBiasAndWaitV3
+
+
+def install_authored_programs(
+    quick_module: Any,
+    *,
+    channel_variables: Optional[Mapping[str, int]] = None,
+) -> Mapping[str, Any]:
+    """Install every v3-authored Mercator program idempotently."""
+    from .mercator import install_program
+    from .programs import PROGRAMS
+
+    return {
+        program.name: install_program(
+            quick_module,
+            program,
+            channel_variables=channel_variables,
+        )
+        for program in PROGRAMS
+    }
 
 
 class QuickHeldFluxController(CallbackFluxController):
@@ -394,4 +422,3 @@ def make_held_flux_controller(
         unit=str(line.get("unit", "dac_gain")),
         settle_seconds=0.0,
     )
-

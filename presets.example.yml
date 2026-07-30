@@ -99,6 +99,28 @@ presets:
     acceptance:
       r2_min: 0.7
 
+  two_tone_zpa:
+    experiment: two_tone_zpa
+    parameters:
+      q_freq: {center_from: defaults.q_freq, span: 20.0, points: 101, unit: MHz}
+      z_gain: {start: -0.2, stop: 0.2, points: 21, unit: a.u.}
+      q_gain: 0.3
+      q_length: 10.0
+      z_length: 20.0
+      z_settle: 5.0
+      r_power: -35.0
+      r_length: 2.0
+      r_relax: 20.0
+      hard_avg: 1000
+      soft_avg: 1
+      rep: 0
+    run:
+      dB: false
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      note: native authored-program q_freq-by-z_gain grid
+
   rabi_chevron_duration:
     experiment: rabi_chevron
     parameters:
@@ -220,6 +242,23 @@ presets:
       model: bounded_exponential
     acceptance:
       r2_min: 0.7
+
+  t1_zpa:
+    experiment: t1_zpa
+    parameters:
+      z_gain: {start: -0.2, stop: 0.2, points: 9, unit: a.u.}
+      delay: {start: 0.1, stop: 30.0, points: 61, unit: us}
+      q_gain: 0.4
+      q_length: 0.115
+      r_relax: 60.0
+      hard_avg: 1000
+      soft_avg: 1
+      rep: 1
+    run:
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      note: native authored-program T1 delay-by-z_gain grid
 
   ramsey_chevron:
     experiment: ramsey_chevron

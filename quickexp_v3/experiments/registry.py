@@ -17,6 +17,8 @@ from .ramsey import EXPERIMENT as ramsey
 from .ramsey_chevron import EXPERIMENT as ramsey_chevron
 from .resonator_spectroscopy import EXPERIMENT as resonator_spectroscopy
 from .t1 import EXPERIMENT as t1
+from .t1_zpa import EXPERIMENT as t1_zpa
+from .two_tone_zpa import EXPERIMENT as two_tone_zpa
 
 
 EXPERIMENTS: Dict[str, Experiment] = {
@@ -33,6 +35,8 @@ EXPERIMENTS: Dict[str, Experiment] = {
         ramsey,
         ramsey_chevron,
         echo,
+        two_tone_zpa,
+        t1_zpa,
     )
 }
 
@@ -48,4 +52,3 @@ def get(name: str) -> Experiment:
         raise ExperimentError(
             f"unknown experiment {name!r}; available: {', '.join(names())}"
         ) from error
-

@@ -35,6 +35,9 @@ class DeviceModel:
     qubit_linewidth_mhz: float = 0.7
     rabi_rate_per_gain_mhz: float = 3.0
     t1_us: float = 6.2
+    t1_flux_modulation_fraction: float = 0.20
+    t1_flux_feature_z: float = 0.10
+    t1_flux_feature_width_z: float = 0.03
     t2_ramsey_us: float = 1.8
     t2_echo_us: float = 5.0
     dispersive_shift_mhz: float = 1.0
@@ -111,6 +114,14 @@ class DeviceModel:
             1.0 + self.coherence_fraction_per_hour * self.elapsed_hours,
         )
         return float(base) * scale
+
+    def t1_at_flux(self, z_gain: Any) -> np.ndarray:
+        z = np.asarray(z_gain, dtype=float)
+        width = max(abs(self.t1_flux_feature_width_z), np.finfo(float).eps)
+        modulation = self.t1_flux_modulation_fraction * np.exp(
+            -0.5 * ((z - self.t1_flux_feature_z) / width) ** 2
+        )
+        return self.coherence_time("t1") * np.maximum(0.05, 1.0 - modulation)
 
     def advance(self, hours: float) -> None:
         self.elapsed_hours += float(hours)

@@ -41,6 +41,7 @@ C:\Users\quant\anaconda3\envs\qcodes\python.exe -m pytest -q
 | `06a_qubit_spectroscopy.py` | qubit spectroscopy |
 | `06b_qubit_spectroscopy_vs_flux.py` | qubit spectroscopy versus Z |
 | `06c_qubit_spectroscopy_vs_gain.py` | gain-by-frequency power spectroscopy |
+| `06f_qubit_spectroscopy_zpa.py` | authored native frequency-by-Z map (simulation until hardware gates pass) |
 | `07a_rabi_chevron_duration.py` | frequency-by-duration Rabi chevron |
 | `07b_rabi_chevron_amplitude.py` | frequency-by-gain Rabi chevron |
 | `08a_time_rabi.py` | pulse-duration Rabi |
@@ -49,6 +50,7 @@ C:\Users\quant\anaconda3\envs\qcodes\python.exe -m pytest -q
 | `09a_iq_blobs.py` | ground/excited IQ clouds |
 | `10a_readout_frequency_optimization.py` | dispersive readout scan |
 | `11_t1.py` | energy relaxation |
+| `11c_t1_vs_flux.py` | authored finite-Z-pulse T1 map (simulation until hardware gates pass) |
 | `12_ramsey_chevron.py` | frequency-by-delay Ramsey chevron |
 | `13a_ramsey.py` | Ramsey dephasing |
 | `14_echo.py` | Hahn echo / fixed-cycle CPMG |

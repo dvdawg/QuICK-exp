@@ -186,6 +186,22 @@ def plot_data(data: ExperimentData, title: str):
 def _print_envelope_preflight(details: Optional[Mapping[str, Any]]) -> None:
     if not details:
         return
+    if "program" in details:
+        program = details.get("program", {})
+        envelopes = program.get("envelopes", {}) if isinstance(program, Mapping) else {}
+        required = sum(
+            int(value.get("required_samples", 0))
+            for value in envelopes.values()
+            if isinstance(value, Mapping)
+        )
+        print(
+            "Authored Mercator preflight: "
+            f"{required} waveform samples budgeted across "
+            f"{len(envelopes)} envelope term(s)."
+        )
+        for warning in details.get("warnings", ()):
+            print(f"Mercator preflight warning: {warning}")
+        return
     print(
         "Quick envelope preflight: "
         f"{details['required_samples']}/{details['available_samples']} "

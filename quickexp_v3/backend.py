@@ -55,6 +55,50 @@ QUICK_Q_ENVELOPE_TERMS = {
     "T2Ramsey": (("q_length", 1), ("q_length_2", 2)),
     "T2Echo": (("q_length", 1), ("q_length_2", 2)),
 }
+_REGISTERED_CLASS_VARIABLES = {}
+_REGISTERED_ENVELOPE_TERMS = {}
+
+
+def register_program_variables(quick_class: str, names: Any) -> frozenset:
+    """Register constructor variables for one authored Quick class."""
+    class_name = str(quick_class).strip()
+    normalized = frozenset(str(name).strip() for name in names)
+    if not class_name or not normalized or "" in normalized:
+        raise ConfigError("authored program variables require non-empty names")
+    collisions = normalized.intersection(QUICK_CONFIG_OVERRIDES)
+    if collisions:
+        raise ConfigError(
+            "authored program variables collide with Mercator config overrides: "
+            + ", ".join(sorted(collisions))
+        )
+    existing = _REGISTERED_CLASS_VARIABLES.get(class_name)
+    if existing is not None and existing != normalized:
+        raise ConfigError(
+            f"variables for authored program {class_name!r} are already registered"
+        )
+    _REGISTERED_CLASS_VARIABLES[class_name] = normalized
+    return normalized
+
+
+def register_envelope_terms(quick_class: str, terms: Any) -> tuple:
+    """Register the legacy-compatible envelope-memory terms for a program."""
+    class_name = str(quick_class).strip()
+    normalized = []
+    for term in terms:
+        if not isinstance(term, (tuple, list)) or len(term) != 2:
+            raise ConfigError("envelope terms must be (variable_name, count) pairs")
+        name, count = str(term[0]).strip(), int(term[1])
+        if not name or count < 1:
+            raise ConfigError("envelope terms require a name and positive count")
+        normalized.append((name, count))
+    result = tuple(normalized)
+    existing = _REGISTERED_ENVELOPE_TERMS.get(class_name)
+    if existing is not None and existing != result:
+        raise ConfigError(
+            f"envelope terms for authored program {class_name!r} are already registered"
+        )
+    _REGISTERED_ENVELOPE_TERMS[class_name] = result
+    return result
 
 
 def _maximum_envelope_samples(
@@ -80,7 +124,10 @@ def _maximum_envelope_samples(
 
 def validate_quick_envelope_memory(plan: Any, soccfg: Any) -> Optional[dict]:
     """Reject Quick Gaussian waveforms that cannot fit the q-generator RAM."""
-    terms = QUICK_Q_ENVELOPE_TERMS.get(plan.quick_class)
+    terms = QUICK_Q_ENVELOPE_TERMS.get(
+        plan.quick_class,
+        _REGISTERED_ENVELOPE_TERMS.get(plan.quick_class),
+    )
     if terms is None:
         return None
     variables = dict(plan.variables)
@@ -263,7 +310,24 @@ class QuickBackend:
 
     def validate(self, plan: Any) -> Optional[dict]:
         """Validate hardware-dependent plan limits without acquiring."""
-        return validate_quick_envelope_memory(plan, self.soccfg)
+        callback = plan.metadata.get("preflight")
+        if not callable(callback):
+            return validate_quick_envelope_memory(plan, self.soccfg)
+        # Authored programs carry a style-aware validator. Running the legacy
+        # class table as well would incorrectly charge a flat-top's full
+        # duration instead of its waveform ramps.
+        envelope = None
+        report = callback(self.soccfg, plan.variables)
+        errors = tuple(getattr(report, "errors", ()))
+        if errors:
+            raise ConfigError(
+                f"{plan.name} Mercator preflight failed: " + "; ".join(errors)
+            )
+        return {
+            "envelope": envelope,
+            "program": dict(getattr(report, "details", {})),
+            "warnings": list(getattr(report, "warnings", ())),
+        }
 
     def acquire(self, plan: Any) -> BackendResult:
         if not self.connected:
@@ -281,6 +345,8 @@ class QuickBackend:
         variables = deepcopy(dict(plan.variables))
         variable_names = QUICK_BASE_VARIABLES.union(
             QUICK_CLASS_VARIABLES.get(plan.quick_class, frozenset())
+        ).union(
+            _REGISTERED_CLASS_VARIABLES.get(plan.quick_class, frozenset())
         )
         quick_variables = {
             name: value
@@ -463,9 +529,13 @@ class SyntheticBackend:
                 grid.ravel()
                 for grid in np.meshgrid(*axis_arrays, indexing="ij")
             ]
-            signal_axis = next(
-                (index for index, name in enumerate(axes) if "freq" in name),
-                0,
+            signal_axis = (
+                axes.index("time")
+                if plan.quick_class in {"T1", "T1_zpa"} and "time" in axes
+                else next(
+                    (index for index, name in enumerate(axes) if "freq" in name),
+                    0,
+                )
             )
             x = grids[signal_axis]
             center = float(np.mean(axis_arrays[signal_axis]))
@@ -473,11 +543,12 @@ class SyntheticBackend:
             if plan.quick_class in {
                 "ResonatorSpectroscopy",
                 "QubitSpectroscopy",
+                "TwoTone_ZPA",
                 "DispersiveSpectroscopy",
             }:
                 feature = 0.4 / (1 + ((x - center) / (span / 15)) ** 2)
                 iq = 1.0 - feature * np.exp(0.4j)
-            elif plan.quick_class == "T1":
+            elif plan.quick_class in {"T1", "T1_zpa"}:
                 iq = 0.2 + 0.8 * np.exp(-(x - x.min()) / (span / 3))
             else:
                 iq = 0.5 + 0.4 * np.exp(-(x - x.min()) / max(span, 1e-9)) * np.cos(
@@ -609,7 +680,7 @@ class SyntheticBackend:
                 )
                 iq = 1.0 - 0.65 / (1.0 + 1j * detuning) + noise
                 truth["resonator_center_mhz"] = np.asarray(center).tolist()
-            elif plan.quick_class == "QubitSpectroscopy":
+            elif plan.quick_class in {"QubitSpectroscopy", "TwoTone_ZPA"}:
                 frequency = variable("q_freq")
                 center = device.qubit_frequency(variable("z_gain", 0.0))
                 detuning = (
@@ -688,14 +759,18 @@ class SyntheticBackend:
                         "rabi_rate_mhz": np.asarray(omega).tolist(),
                     }
                 )
-            elif plan.quick_class == "T1":
+            elif plan.quick_class in {"T1", "T1_zpa"}:
                 time = variable("time")
-                decay = device.coherence_time("t1")
+                decay = (
+                    device.t1_at_flux(variable("z_gain", 0.0))
+                    if plan.quick_class == "T1_zpa"
+                    else device.coherence_time("t1")
+                )
                 population = 0.08 + 0.82 * np.exp(
-                    -(time - np.min(time)) / max(decay, 1e-9)
+                    -(time - np.min(time)) / np.maximum(decay, 1e-9)
                 )
                 iq = population * np.exp(0.25j) + noise
-                truth["t1_us"] = decay
+                truth["t1_us"] = np.asarray(decay).tolist()
             elif plan.quick_class == "T2Ramsey":
                 time = variable("time")
                 true_frequency = device.qubit_frequency(variable("z_gain", 0.0))
