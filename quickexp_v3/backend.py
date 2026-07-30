@@ -396,11 +396,17 @@ class QuickBackend:
 
 
 class SyntheticBackend:
-    """Deterministic backend for config checks, demos, and tests."""
+    """Deterministic backend for config checks, demos, and loop tests."""
 
-    def __init__(self, seed: int = 7, fail_attempts: int = 0):
+    def __init__(
+        self,
+        seed: int = 7,
+        fail_attempts: int = 0,
+        device: Any = None,
+    ):
         self.seed = int(seed)
         self.fail_attempts = int(fail_attempts)
+        self.device = device
         self.calls = 0
         self.recoveries = 0
         self.connected = False
@@ -414,7 +420,18 @@ class SyntheticBackend:
         self.calls += 1
         if self.calls <= self.fail_attempts:
             raise AcquisitionError(f"synthetic transient failure {self.calls}")
+        if self.device is not None:
+            names = (str(plan.name), str(plan.quick_class))
+            if any(
+                self.device.consume_failure(name)
+                for name in dict.fromkeys(names)
+            ):
+                raise AcquisitionError(
+                    f"synthetic device injected failure for {plan.name}"
+                )
         rng = np.random.default_rng(self.seed + self.calls)
+        if self.device is not None:
+            return self._acquire_device(plan, rng)
         axes = list(plan.axes)
         if plan.quick_class == "LoopBack":
             x = np.linspace(0.0, 8.0, 500)
@@ -502,6 +519,241 @@ class SyntheticBackend:
             },
         )
 
+    def _acquire_device(self, plan: Any, rng: Any) -> BackendResult:
+        device = self.device
+        axes = list(plan.axes)
+        truth = {
+            "elapsed_hours": float(device.elapsed_hours),
+        }
+        if plan.quick_class == "LoopBack":
+            x = np.linspace(0.0, 8.0, 500)
+            envelope = ((x > 1.0) & (x < 3.0)).astype(float)
+            iq = envelope * np.exp(0.2j) + 0.01 * (
+                rng.normal(size=x.size) + 1j * rng.normal(size=x.size)
+            )
+            data = np.column_stack(
+                (x, np.abs(iq), np.angle(iq), iq.real, iq.imag)
+            )
+        elif plan.quick_class == "IQScatter":
+            shots = int(plan.variables.get("rep", 2000))
+            ground_mean = np.asarray(device.readout_ground_mean, dtype=float)
+            excited_mean = np.asarray(device.readout_excited_mean, dtype=float)
+            ground = rng.multivariate_normal(
+                ground_mean,
+                np.asarray(device.readout_ground_covariance, dtype=float),
+                size=shots,
+            )
+            excited = rng.multivariate_normal(
+                excited_mean,
+                np.asarray(device.readout_excited_covariance, dtype=float),
+                size=shots,
+            )
+            thermal = rng.random(shots) < float(device.thermal_population)
+            leakage = rng.random(shots) < float(device.leakage_probability)
+            if np.any(thermal):
+                ground[thermal] = rng.multivariate_normal(
+                    excited_mean,
+                    np.asarray(device.readout_excited_covariance, dtype=float),
+                    size=int(np.count_nonzero(thermal)),
+                )
+            if np.any(leakage):
+                excited[leakage] = rng.multivariate_normal(
+                    1.8 * excited_mean - 0.8 * ground_mean,
+                    1.5 * np.asarray(device.readout_excited_covariance, dtype=float),
+                    size=int(np.count_nonzero(leakage)),
+                )
+            data = np.column_stack(
+                (ground[:, 0], ground[:, 1], excited[:, 0], excited[:, 1])
+            )
+            truth.update(
+                {
+                    "thermal_population": float(device.thermal_population),
+                    "leakage_probability": float(device.leakage_probability),
+                }
+            )
+        else:
+            if not axes:
+                raise AcquisitionError("synthetic swept experiment has no axis")
+            axis_arrays = [
+                np.asarray(plan.variables[name], dtype=float) for name in axes
+            ]
+            grids = [
+                grid.ravel()
+                for grid in np.meshgrid(*axis_arrays, indexing="ij")
+            ]
+            points = grids[0].size
+
+            def variable(name, default=0.0):
+                if name in axes:
+                    return grids[axes.index(name)]
+                value = np.asarray(plan.variables.get(name, default), dtype=float)
+                if value.size == 1:
+                    return np.full(points, float(value.ravel()[0]))
+                if value.size == points:
+                    return value.ravel()
+                return np.full(points, float(value.ravel()[0]))
+
+            noise = 0.005 * (
+                rng.normal(size=points) + 1j * rng.normal(size=points)
+            )
+            if plan.quick_class == "ResonatorSpectroscopy":
+                frequency = variable("r_freq")
+                center = device.resonator_frequency(
+                    variable("r_power", -35.0),
+                    variable("z_gain", 0.0),
+                )
+                detuning = (
+                    2.0
+                    * (frequency - center)
+                    / max(float(device.resonator_linewidth_mhz), 1e-9)
+                )
+                iq = 1.0 - 0.65 / (1.0 + 1j * detuning) + noise
+                truth["resonator_center_mhz"] = np.asarray(center).tolist()
+            elif plan.quick_class == "QubitSpectroscopy":
+                frequency = variable("q_freq")
+                center = device.qubit_frequency(variable("z_gain", 0.0))
+                detuning = (
+                    2.0
+                    * (frequency - center)
+                    / max(float(device.qubit_linewidth_mhz), 1e-9)
+                )
+                iq = 0.1 + 0.75 / (1.0 + 1j * detuning) + noise
+                truth["qubit_center_mhz"] = np.asarray(center).tolist()
+            elif plan.quick_class == "DispersiveSpectroscopy":
+                frequency = variable("r_freq")
+                center = device.resonator_frequency(
+                    variable("r_power", -35.0),
+                    variable("z_gain", 0.0),
+                )
+                width = max(float(device.resonator_linewidth_mhz), 1e-9)
+                ground = 1.0 - 0.5 / (
+                    1.0 + 2j * (frequency - center) / width
+                ) + noise
+                excited = 1.0 - 0.5 / (
+                    1.0
+                    + 2j
+                    * (
+                        frequency
+                        - center
+                        - float(device.dispersive_shift_mhz)
+                    )
+                    / width
+                ) + noise
+                columns = list(grids)
+                columns.extend(
+                    [
+                        np.abs(ground),
+                        np.angle(ground),
+                        ground.real,
+                        ground.imag,
+                        np.abs(excited),
+                        np.angle(excited),
+                        excited.real,
+                        excited.imag,
+                    ]
+                )
+                data = np.column_stack(columns)
+                truth["dispersive_shift_mhz"] = float(
+                    device.dispersive_shift_mhz
+                )
+                return BackendResult(
+                    payload=data,
+                    metadata={
+                        "backend": "synthetic",
+                        "seed": self.seed,
+                        "call": self.calls,
+                        "device_model": truth,
+                    },
+                )
+            elif plan.quick_class == "Rabi":
+                q_frequency = variable(
+                    "q_freq",
+                    float(device.qubit_frequency(variable("z_gain", 0.0))[0]),
+                )
+                true_frequency = device.qubit_frequency(variable("z_gain", 0.0))
+                detuning = q_frequency - true_frequency
+                omega = device.rabi_rate(variable("q_gain", 0.4))
+                generalized = np.sqrt(omega**2 + detuning**2)
+                duration = variable("q_length", 0.115)
+                population = (
+                    omega**2
+                    / np.maximum(generalized**2, np.finfo(float).eps)
+                    * np.sin(np.pi * generalized * duration) ** 2
+                    * np.exp(-duration / max(4.0 * device.t1_us, 1e-9))
+                )
+                iq = (0.12 + 0.75 * population) * np.exp(0.3j) + noise
+                truth.update(
+                    {
+                        "qubit_center_mhz": np.asarray(true_frequency).tolist(),
+                        "rabi_rate_mhz": np.asarray(omega).tolist(),
+                    }
+                )
+            elif plan.quick_class == "T1":
+                time = variable("time")
+                decay = device.coherence_time("t1")
+                population = 0.08 + 0.82 * np.exp(
+                    -(time - np.min(time)) / max(decay, 1e-9)
+                )
+                iq = population * np.exp(0.25j) + noise
+                truth["t1_us"] = decay
+            elif plan.quick_class == "T2Ramsey":
+                time = variable("time")
+                true_frequency = device.qubit_frequency(variable("z_gain", 0.0))
+                drive = variable("q_freq", true_frequency)
+                fringe = variable("fringe_freq", 0.0)
+                oscillation = fringe + true_frequency - drive
+                decay = device.coherence_time("ramsey")
+                population = (
+                    0.5
+                    + 0.42
+                    * np.exp(-(time - np.min(time)) / max(decay, 1e-9))
+                    * np.cos(2.0 * np.pi * oscillation * time + 0.25)
+                )
+                iq = population * np.exp(0.25j) + noise
+                truth.update(
+                    {
+                        "t2_ramsey_us": decay,
+                        "ramsey_frequency_mhz": np.asarray(oscillation).tolist(),
+                    }
+                )
+            elif plan.quick_class == "T2Echo":
+                time = variable("time")
+                cycles = np.maximum(variable("cycle", 1.0), 0.0)
+                decay = device.coherence_time("echo") * np.sqrt(cycles + 1.0)
+                population = 0.08 + 0.82 * np.exp(
+                    -(time - np.min(time)) / np.maximum(decay, 1e-9)
+                )
+                iq = population * np.exp(0.25j) + noise
+                truth["t2_echo_us"] = np.asarray(decay).tolist()
+            else:
+                signal_axis = next(
+                    (index for index, name in enumerate(axes) if "freq" in name),
+                    0,
+                )
+                x = grids[signal_axis]
+                span = max(float(np.ptp(axis_arrays[signal_axis])), 1e-9)
+                iq = (
+                    0.5
+                    + 0.4
+                    * np.exp(-(x - x.min()) / span)
+                    * np.cos(2 * np.pi * 4 * (x - x.min()) / span + 0.2)
+                    + noise
+                )
+            columns = list(grids)
+            if bool(plan.run_options.get("population", False)):
+                columns.append(np.clip(iq.real, 0.0, 1.0))
+            columns.extend([np.abs(iq), np.angle(iq), iq.real, iq.imag])
+            data = np.column_stack(columns)
+        return BackendResult(
+            payload=data,
+            metadata={
+                "backend": "synthetic",
+                "seed": self.seed,
+                "call": self.calls,
+                "device_model": truth,
+            },
+        )
+
     def recover(self, error: BaseException, attempt: int) -> dict:
         self.recoveries += 1
         return {"attempt": attempt, "error": str(error), "actions": ["synthetic_recover"]}
@@ -512,6 +764,12 @@ class SyntheticBackend:
             "seed": self.seed,
             "calls": self.calls,
             "recoveries": self.recoveries,
+            "device_model": self.device is not None,
+            "elapsed_hours": (
+                float(self.device.elapsed_hours)
+                if self.device is not None
+                else None
+            ),
         }
 
     def close(self) -> None:

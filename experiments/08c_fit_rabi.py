@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from quickexp_v3.ide import load_repository
+from quickexp_v3.fit_stats import pi_consistency
 from quickexp_v3.rabi_fit import (
     accept_rabi_fit,
     find_latest_rabi,
@@ -54,6 +55,7 @@ def main():
     source = _input_path()
     print(source)
     fit = fit_rabi(source, variable=FIT_VARIABLE)
+    consistency = pi_consistency(fit)
     passes = fit.passes(
         minimum_r_squared=MINIMUM_R_SQUARED,
         minimum_oscillations=MINIMUM_OSCILLATIONS,
@@ -76,6 +78,13 @@ def main():
         f"oscillations: {fit.statistics['oscillations']:.3f}; "
         "relative pi uncertainty: "
         f"{fit.statistics['relative_pi_uncertainty']:.2%}"
+    )
+    print(
+        "Pi consistency: measured contrast "
+        f"{consistency['measured_contrast_at_pi']:.3f}; "
+        "pi/half-period "
+        f"{consistency['pi_to_half_period_ratio']:.3f}; "
+        f"odd-multiple check={'PASS' if consistency['odd_multiple_consistent'] else 'FAIL'}"
     )
     print(
         "Acceptance gates: "

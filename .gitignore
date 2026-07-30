@@ -8,4 +8,6 @@ runs/
 hardware.yml
 calibration.yml
 presets.yml
-
+analysis_cache/
+analysis_out/
+autocal_runs/

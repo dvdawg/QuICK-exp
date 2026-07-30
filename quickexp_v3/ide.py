@@ -13,8 +13,8 @@ from .backend import SyntheticBackend
 from .config import ConfigRepository
 from .data import ExperimentData
 from .errors import ConfigError
+from .flux_lookup import frequency_from_record
 from .lab import connect_quick, make_held_flux_controller
-from .resonator_flux import frequency_from_calibration_record
 from .runtime import CompletedRun, ExperimentRunner
 from .util import to_builtin
 
@@ -322,7 +322,7 @@ def resonator_frequency_from_flux(
         record = repository.calibration["records"]["lookups"][
             "resonator_vs_flux"
         ]
-        return frequency_from_calibration_record(record, z_gain)
+        return frequency_from_record(record, z_gain)
     except (KeyError, TypeError, ValueError, ConfigError) as error:
         raise RuntimeError(
             str(error)

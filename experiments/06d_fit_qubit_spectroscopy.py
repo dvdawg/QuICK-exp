@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from quickexp_v3.ide import load_repository
+from quickexp_v3.notch_fit import fit_spectroscopy_features
 from quickexp_v3.native_fit import (
     accept_spectroscopy_fit,
     find_latest_native,
@@ -32,6 +33,7 @@ FIT_SIGNAL = "IQ"
 # Strongly recommended when a coarse scan contains multiple candidate peaks.
 # Example: (5595.0, 5615.0). None fits the full acquired frequency axis.
 FIT_WINDOW_MHZ = None
+ENABLE_TWO_FEATURE_SELECTION = True
 
 MINIMUM_R_SQUARED = 0.50
 MINIMUM_CONTRAST_SNR = 3.0
@@ -59,7 +61,12 @@ def _input_path() -> Path:
 
 def main():
     source = _input_path()
-    fit = fit_spectroscopy(
+    fit_function = (
+        fit_spectroscopy_features
+        if ENABLE_TWO_FEATURE_SELECTION
+        else fit_spectroscopy
+    )
+    fit = fit_function(
         source,
         kind="qubit",
         signal=FIT_SIGNAL,
@@ -84,6 +91,13 @@ def main():
         f"contrast SNR: {fit.statistics['contrast_snr']:.3f}; "
         f"RMSE: {fit.statistics['rmse']:.6g}"
     )
+    if ENABLE_TWO_FEATURE_SELECTION:
+        print(
+            "Feature selection: "
+            f"{'multiple features' if fit.statistics['multi_feature'] else 'single feature'}; "
+            f"Delta BIC(2 vs 1)={fit.statistics['delta_bic_two_vs_one']:.3f}; "
+            f"ripple suspected={fit.statistics['ripple_suspected']}"
+        )
     print(
         "Acceptance gates: "
         f"{'PASS' if passes else 'FAIL'} "

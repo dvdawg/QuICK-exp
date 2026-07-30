@@ -215,6 +215,11 @@ class Experiment:
             passed = float(result.values["fidelity"]) >= float(fidelity_min)
             quality["fidelity_pass"] = passed
             valid = valid and passed
+        span_min = config.acceptance.get("span_over_decay_min")
+        if span_min is not None and "span_over_decay" in quality:
+            passed = float(quality["span_over_decay"]) >= float(span_min)
+            quality["span_over_decay_pass"] = passed
+            valid = valid and passed
         return AnalysisResult(
             model=result.model,
             values=result.values,
@@ -222,4 +227,3 @@ class Experiment:
             valid=valid,
             recommendation=result.recommendation,
         )
-
