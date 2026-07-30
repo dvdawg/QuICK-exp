@@ -23,7 +23,7 @@ from quickexp_v3.rabi_fit import (
 LIVE_HARDWARE = False
 
 # None selects the newest matching native Quick CSV/YML pair.
-INPUT_CSV = None
+INPUT_CSV = r"Z:\David\Data\2026-07-21_MET_ver191_qubit3\00073 - (Rabi)Zp0p1400_rabi_q3959p000.csv"
 # q_length fits Time Rabi; q_gain fits Power Rabi; auto uses the newest of both.
 FIT_VARIABLE = "q_length"
 
@@ -52,6 +52,7 @@ def _input_path() -> Path:
 
 def main():
     source = _input_path()
+    print(source)
     fit = fit_rabi(source, variable=FIT_VARIABLE)
     passes = fit.passes(
         minimum_r_squared=MINIMUM_R_SQUARED,

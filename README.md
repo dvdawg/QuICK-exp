@@ -1,23 +1,31 @@
 # QuICK-exp v3
 
-QuICK-exp v3 is a numbered, one-file-per-measurement workflow for qubit measurement using a QICK board
-with shared YAML configuration, port verification,
-calibration precedence, recovery, and held-flux functionality.
+QuICK-exp v3 follows the numbered, one-file-per-measurement workflow of
+`opx-expcode` while retaining shared YAML configuration, port verification,
+calibration precedence, recovery, and held-flux safety from v2.
 
-## Usage and Startup
+The workflow is IDE-first—there is no CLI. Open a numbered file in
+`experiments/`, edit its `EDIT THESE` block, and press Run.
 
-1. Open `experiments/01_configure_experiment.py`, edit shared values such as
+## First use
+
+1. Select `C:\Users\quant\anaconda3\envs\qcodes\python.exe` in the IDE.
+2. Open `experiments/01_configure_experiment.py`, edit shared values such as
    `q_freq`, `r_freq`, the native data directory, connection, or logical
    channels, and run it once with `WRITE_CHANGES = False`.
-2. When the preview is correct, set `WRITE_CHANGES = True`, run it, then set it
+3. When the preview is correct, set `WRITE_CHANGES = True`, run it, then set it
    back to `False`.
-3. Run `00_connect_and_ports.py` to connect and verify the live `soccfg`
+4. Run `00_connect_and_ports.py` to connect and verify the live `soccfg`
    against the `r/rr/q/z` map.
-4. Run 02 to verify the raw ADC trace/readout trigger offset before proceeding
+5. Run 02 to verify the raw ADC trace/readout trigger offset before proceeding
    through spectroscopy and time-domain measurements.
 
 Installation is optional because each launcher adds the project root to
-`sys.path`.
+`sys.path`. To run tests:
+
+```powershell
+C:\Users\quant\anaconda3\envs\qcodes\python.exe -m pytest -q
+```
 
 ## Experimental order
 
@@ -46,6 +54,10 @@ Installation is optional because each launcher adds the project root to
 | `14_echo.py` | Hahn echo / fixed-cycle CPMG |
 | `16_two_photon_spectroscopy.py` | high-power two-photon search |
 | `90_measurement_queue.py` | run selected numbered files sequentially |
+
+The order and experiment variants follow `opx-expcode`; Quick classes, routing,
+and held-Z behavior were checked against `2026-07-21 MET v191.ipynb` and
+installed Quick 0.7.2.
 
 ## Measurement queue
 
@@ -128,6 +140,16 @@ rejected immediately. This is a configuration error, so it is not retried.
 The check also accounts for the cumulative Gaussian envelopes used by
 T1, Ramsey, Echo, IQ Scatter, and Dispersive Spectroscopy.
 
+## Rabi notebook parity
+
+The `07a`, `07b`, `08a`, and `08b` launchers expose the complete working
+notebook recipe in their `EDIT THESE` blocks: `Z_GAIN`, `Z_LENGTH_US`,
+`Z_SETTLE_US`, readout power/length/offset/phase/relaxation, `REP`, and
+`POPULATION`. The MET notebook's Rabi program uses `rep: 1000`,
+`population=False`, `r_power=-30 dB`, a `0.2 us` held-Z pulse, and a `5.0 us`
+program settle. These are explicit Rabi defaults; the generic hardware
+fallback `rep: 1` must not silently replace Quick's Rabi repetition count.
+
 ## Rabi fitting and acceptance
 
 1. Run `08a_time_rabi.py` or `08b_power_rabi.py`.
@@ -146,5 +168,28 @@ The recommendation is phase-corrected: it uses the first fitted oscillation
 extremum opposite the extrapolated zero-pulse state, while also reporting the
 ordinary half-period for comparison.
 
+## MET live behavior
+
+The reviewed logical map is:
+
+```text
+r  = generator 0  -> DAC0  axis_signal_gen_v6
+q  = generator 1  -> DAC1  axis_signal_gen_v6
+rr = readout 0    -> ADC4  axis_dyn_readout_v1
+z  = generator 15 -> DAC15 axis_sg_int4_v2
+```
+
+At zero Z, fixed-Z scripts use the generator reset performed during connection
+and skip the auxiliary acquisition entirely. Nonzero fixed-Z scripts establish
+a minimal one-average `p9_mode: last` pulse on generator 15. The helper
+scalarizes every numeric sweep parameter before compiling this auxiliary
+program, so no 2D readout/qubit list can leak into Mercator. Every connection,
+acquisition, and close also stops/drains/flushes persistent QICK streamer state,
+so LoopBack or an aborted process cannot poison the next integrated sweep. On
+retry the runtime resets generators and reapplies held Z. On exit it parks Z at
+zero.
+
+RF-board programming stays disabled until attenuation/filter settings have
+been deliberately reviewed for the current wiring.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for implementation boundaries.

@@ -15,11 +15,11 @@ from quickexp_v3.naming import number_tag, z_tag
 # ============================ EDIT THESE ====================================
 LIVE_HARDWARE = True
 Z_GAIN = 0.14
-Z_LENGTH_US = 0.2
-Z_SETTLE_US = 5.0
+# Z_LENGTH_US = 0.2
+# Z_SETTLE_US = 5.0
 USE_ACCEPTED_RESONATOR_FLUX_FIT = True
 READOUT_FREQUENCY_MHZ = 6883.11 # Used only when the accepted-fit option above is False.
-Q_FREQUENCY_MHZ = 3959
+Q_FREQUENCY_MHZ = 5625
 Q_GAIN = 0.4
 Q_LENGTH_US = np.arange(0.02, 1.70, 0.01)
 EXTRA_PI_PULSES = 0
@@ -66,7 +66,6 @@ def main():
             "hard_avg": HARD_AVG,
             "soft_avg": SOFT_AVG,
             "rep": REP,
-            "fringe_freq": 5
         },
         run_options={"population": POPULATION},
         show_plot=SHOW_PLOT,

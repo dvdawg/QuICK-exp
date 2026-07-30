@@ -1,4 +1,4 @@
-"""Edit the common lab settings here, then run.
+"""Edit the common lab settings here, then press the IDE Run button.
 
 Set ``WRITE_CHANGES = False`` only when the values below are ready.  The script
 validates the complete hardware/calibration/preset overlay before replacing any
