@@ -15,8 +15,8 @@ from quickexp_v3.naming import number_tag, z_tag
 # ============================ EDIT THESE ====================================
 LIVE_HARDWARE = True
 Z_GAIN = 0.14
-# Z_LENGTH_US = 0.2
-# Z_SETTLE_US = 5.0
+Z_LENGTH_US = 0.2
+Z_SETTLE_US = 5.0
 USE_ACCEPTED_RESONATOR_FLUX_FIT = True
 READOUT_FREQUENCY_MHZ = 6883.11 # Used only when the accepted-fit option above is False.
 Q_FREQUENCY_MHZ = 5625
@@ -74,4 +74,3 @@ def main():
 
 if __name__ == "__main__":
     RESULT = main()
-
