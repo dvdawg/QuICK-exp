@@ -10,6 +10,7 @@ import numpy as np
 import yaml
 
 from test_launchers import EXPECTED
+from test_native_fit import write_pair
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,88 @@ def prepare_project(tmp_path):
         "presets.example.yml",
     ):
         shutil.copy2(ROOT / name, tmp_path / name)
+    (tmp_path / "data").mkdir()
+
+
+def write_native_fit_fixtures(data_directory):
+    loopback_time = np.linspace(0.0, 2.0, 1001)
+    loopback_signal = 0.05 + 0.6 * (
+        1.0 + np.tanh((loopback_time - 0.49) / (2.0 * 0.008))
+    )
+    loopback = write_pair(
+        data_directory / "00001 - (LoopBack)test.csv",
+        quick_class="LoopBack",
+        axis_label="Time",
+        axis_unit="us",
+        x=loopback_time,
+        signal=loopback_signal,
+        var={"r_offset": 0.0},
+    )
+
+    resonator_frequency = np.linspace(6879.2, 6889.2, 201)
+    resonator_signal = (
+        0.2
+        + 0.003 * (resonator_frequency - 6884.2)
+        - 0.8 / (1.0 + ((resonator_frequency - 6884.2) / 0.4) ** 2)
+    )
+    resonator = write_pair(
+        data_directory / "00002 - (ResonatorSpectroscopy)test.csv",
+        quick_class="ResonatorSpectroscopy",
+        axis_label="Readout Pulse Frequency",
+        axis_unit="MHz",
+        x=resonator_frequency,
+        signal=resonator_signal,
+        var={"z_gain": 0.0},
+    )
+
+    qubit_frequency = np.linspace(5598.9, 5608.9, 201)
+    qubit_signal = (
+        0.1
+        - 0.002 * (qubit_frequency - 5603.9)
+        + 0.7 / (1.0 + ((qubit_frequency - 5603.9) / 0.45) ** 2)
+    )
+    qubit = write_pair(
+        data_directory / "00003 - (QubitSpectroscopy)test.csv",
+        quick_class="QubitSpectroscopy",
+        axis_label="Qubit Pulse Frequency",
+        axis_unit="MHz",
+        x=qubit_frequency,
+        signal=qubit_signal,
+        var={"z_gain": 0.0},
+    )
+
+    delay = np.linspace(0.0, 30.0, 301)
+    t1 = write_pair(
+        data_directory / "00004 - (T1)test.csv",
+        quick_class="T1",
+        axis_label="Delay Time",
+        axis_unit="us",
+        x=delay,
+        signal=0.05 + 0.8 * np.exp(-delay / 6.2),
+    )
+
+    ramsey_time = np.linspace(0.0, 5.0, 501)
+    ramsey = write_pair(
+        data_directory / "00005 - (T2Ramsey)test.csv",
+        quick_class="T2Ramsey",
+        axis_label="Delay Time",
+        axis_unit="us",
+        x=ramsey_time,
+        signal=(
+            0.05
+            + 0.8
+            * np.exp(-ramsey_time / 1.8)
+            * np.cos(2.0 * np.pi * 5.2 * ramsey_time + 0.3)
+        ),
+        var={"q_freq": 5600.0, "fringe_freq": 5.0},
+    )
+    return {
+        "02b_fit_loopback.py": loopback,
+        "05e_fit_resonator_spectroscopy.py": resonator,
+        "06d_fit_qubit_spectroscopy.py": qubit,
+        "11b_fit_t1.py": t1,
+        "13b_fit_ramsey.py": ramsey,
+    }
 
 
 def write_flux_scan(path):
@@ -86,6 +169,7 @@ def write_rabi_scan(path):
 
 def test_every_numbered_file_runs_to_completion_offline(tmp_path):
     prepare_project(tmp_path)
+    native_fit_fixtures = write_native_fit_fixtures(tmp_path / "data")
     for filename in EXPECTED:
         namespace = runpy.run_path(
             str(LAUNCHER_DIR / filename),
@@ -100,6 +184,9 @@ def test_every_numbered_file_runs_to_completion_offline(tmp_path):
             module_globals["SHOW_PLOT"] = False
         if "SHOTS" in module_globals:
             module_globals["SHOTS"] = 40
+        if filename in native_fit_fixtures:
+            module_globals["INPUT_CSV"] = native_fit_fixtures[filename]
+            module_globals["WRITE_ACCEPTED_FIT"] = False
         if filename == "05d_fit_resonator_vs_flux.py":
             scan_path = tmp_path / "00001 - ResVsZ_held_bias.csv"
             write_flux_scan(scan_path)
@@ -122,6 +209,8 @@ def test_every_numbered_file_runs_to_completion_offline(tmp_path):
         elif filename == "05d_fit_resonator_vs_flux.py":
             assert result.statistics["r_squared"] > 0.95
         elif filename == "08c_fit_rabi.py":
+            assert result.statistics["r_squared"] > 0.95
+        elif filename in native_fit_fixtures:
             assert result.statistics["r_squared"] > 0.95
         elif isinstance(result, list):
             assert len(result) == 3
