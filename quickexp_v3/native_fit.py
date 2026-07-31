@@ -14,7 +14,7 @@ import yaml
 
 from .analysis import rotate_iq
 from .errors import AnalysisError, ConfigError
-from .fit_calibration import write_calibration_records
+from .fit_calibration import annotate_forced_write, write_calibration_records
 from .util import utc_now
 
 
@@ -1122,20 +1122,44 @@ class LoopbackFit:
         minimum_r_squared: float,
         maximum_edge_uncertainty_us: float,
     ) -> bool:
+        return all(
+            self.acceptance_gates(
+                minimum_edge_snr=minimum_edge_snr,
+                minimum_r_squared=minimum_r_squared,
+                maximum_edge_uncertainty_us=maximum_edge_uncertainty_us,
+            ).values()
+        )
+
+    def acceptance_gates(
+        self,
+        *,
+        minimum_edge_snr: float,
+        minimum_r_squared: float,
+        maximum_edge_uncertainty_us: float,
+    ) -> Mapping[str, bool]:
         step = float(np.median(np.diff(self.time_us)))
         edge = float(self.parameters["edge_in_trace_us"])
-        return bool(
-            np.isfinite(self.statistics["edge_snr"])
-            and np.isfinite(self.statistics["r_squared"])
-            and np.isfinite(self.parameters["edge_uncertainty_us"])
-            and self.statistics["edge_snr"] >= minimum_edge_snr
-            and self.statistics["r_squared"] >= minimum_r_squared
-            and self.parameters["edge_uncertainty_us"]
-            <= maximum_edge_uncertainty_us
-            and self.time_us[0] + 2.0 * step
-            < edge
-            < self.time_us[-1] - 2.0 * step
-        )
+        edge_snr = float(self.statistics["edge_snr"])
+        r_squared = float(self.statistics["r_squared"])
+        edge_uncertainty = float(self.parameters["edge_uncertainty_us"])
+        return {
+            "edge_snr": bool(
+                np.isfinite(edge_snr) and edge_snr >= minimum_edge_snr
+            ),
+            "r_squared": bool(
+                np.isfinite(r_squared) and r_squared >= minimum_r_squared
+            ),
+            "edge_uncertainty_us": bool(
+                np.isfinite(edge_uncertainty)
+                and edge_uncertainty <= maximum_edge_uncertainty_us
+            ),
+            "edge_inside_usable_record": bool(
+                np.isfinite(edge)
+                and self.time_us[0] + 2.0 * step
+                < edge
+                < self.time_us[-1] - 2.0 * step
+            ),
+        }
 
 
 def _two_complex_centers(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -1457,14 +1481,16 @@ def accept_spectroscopy_fit(
     minimum_r_squared: float,
     minimum_contrast_snr: float,
     maximum_center_uncertainty_fraction_of_fwhm: float,
+    force_write: bool = False,
 ) -> Path:
-    if not fit.passes(
+    gates_passed = fit.passes(
         minimum_r_squared=minimum_r_squared,
         minimum_contrast_snr=minimum_contrast_snr,
         maximum_center_uncertainty_fraction_of_fwhm=(
             maximum_center_uncertainty_fraction_of_fwhm
         ),
-    ):
+    )
+    if not gates_passed and not force_write:
         raise AnalysisError("spectroscopy fit did not pass its acceptance gates")
     name = SPECTROSCOPY_KINDS[fit.kind]["record"]
     record = _record(
@@ -1485,10 +1511,12 @@ def accept_spectroscopy_fit(
             f"fixed-flux {fit.kind} spectroscopy sweep."
         ),
     )
-    return write_calibration_records(
-        project_root,
+    updates = annotate_forced_write(
         {f"defaults.{name}": record},
+        force_write=force_write,
+        gates_passed=gates_passed,
     )
+    return write_calibration_records(project_root, updates)
 
 
 def accept_t1_fit(
@@ -1498,12 +1526,14 @@ def accept_t1_fit(
     minimum_r_squared: float,
     minimum_span_over_t1: float,
     maximum_relative_t1_uncertainty: float,
+    force_write: bool = False,
 ) -> Path:
-    if not fit.passes(
+    gates_passed = fit.passes(
         minimum_r_squared=minimum_r_squared,
         minimum_span_over_t1=minimum_span_over_t1,
         maximum_relative_t1_uncertainty=maximum_relative_t1_uncertainty,
-    ):
+    )
+    if not gates_passed and not force_write:
         raise AnalysisError("T1 fit did not pass its acceptance gates")
     record = _record(
         value=fit.t1_us,
@@ -1517,10 +1547,12 @@ def accept_t1_fit(
         model="bounded_exponential",
         notes=f"T1 fitted from the {fit.signal_label} channel.",
     )
-    return write_calibration_records(
-        project_root,
+    updates = annotate_forced_write(
         {"derived.t1": record},
+        force_write=force_write,
+        gates_passed=gates_passed,
     )
+    return write_calibration_records(project_root, updates)
 
 
 def accept_ramsey_fit(
@@ -1532,12 +1564,14 @@ def accept_ramsey_fit(
     maximum_relative_t2_uncertainty: float,
     update_q_frequency: bool,
     correction_sign: int,
+    force_write: bool = False,
 ) -> Path:
-    if not fit.passes(
+    gates_passed = fit.passes(
         minimum_r_squared=minimum_r_squared,
         minimum_oscillations=minimum_oscillations,
         maximum_relative_t2_uncertainty=maximum_relative_t2_uncertainty,
-    ):
+    )
+    if not gates_passed and not force_write:
         raise AnalysisError("Ramsey fit did not pass its acceptance gates")
     if correction_sign not in (-1, 1):
         raise ConfigError("Ramsey correction_sign must be +1 or -1")
@@ -1589,6 +1623,11 @@ def accept_ramsey_fit(
                 "confirm by repeating Ramsey at this frequency."
             ),
         )
+    updates = annotate_forced_write(
+        updates,
+        force_write=force_write,
+        gates_passed=gates_passed,
+    )
     return write_calibration_records(project_root, updates)
 
 
@@ -1599,12 +1638,14 @@ def accept_loopback_fit(
     minimum_edge_snr: float,
     minimum_r_squared: float,
     maximum_edge_uncertainty_us: float,
+    force_write: bool = False,
 ) -> Path:
-    if not fit.passes(
+    gates_passed = fit.passes(
         minimum_edge_snr=minimum_edge_snr,
         minimum_r_squared=minimum_r_squared,
         maximum_edge_uncertainty_us=maximum_edge_uncertainty_us,
-    ):
+    )
+    if not gates_passed and not force_write:
         raise AnalysisError("loopback fit did not pass its acceptance gates")
     record = _record(
         value=fit.recommended_r_offset_us,
@@ -1624,7 +1665,9 @@ def accept_loopback_fit(
             "plus the fitted pulse edge position within the ADC trace."
         ),
     )
-    return write_calibration_records(
-        project_root,
+    updates = annotate_forced_write(
         {"defaults.r_offset": record},
+        force_write=force_write,
+        gates_passed=gates_passed,
     )
+    return write_calibration_records(project_root, updates)

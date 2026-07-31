@@ -36,6 +36,8 @@ MAXIMUM_RELATIVE_T1_UNCERTAINTY = 0.25
 
 # Safety latch: writes records.derived.t1, not a pulse parameter.
 WRITE_ACCEPTED_FIT = False
+# Independent manual override: writes even when acceptance gates fail.
+FORCE_WRITE = False
 SHOW_PLOT = True
 # ============================================================================
 
@@ -86,7 +88,9 @@ def main():
         f"{MAXIMUM_RELATIVE_T1_UNCERTAINTY:.1%})"
     )
     figure = plot_t1_fit(fit)
-    if WRITE_ACCEPTED_FIT:
+    if WRITE_ACCEPTED_FIT or FORCE_WRITE:
+        if FORCE_WRITE and not passes:
+            print("WARNING: FORCE_WRITE=True is bypassing failed acceptance gates.")
         calibration_path = accept_t1_fit(
             PROJECT_ROOT,
             fit,
@@ -95,8 +99,10 @@ def main():
             maximum_relative_t1_uncertainty=(
                 MAXIMUM_RELATIVE_T1_UNCERTAINTY
             ),
+            force_write=FORCE_WRITE,
         )
-        print(f"Accepted T1 written atomically to {calibration_path}")
+        action = "Force-written" if FORCE_WRITE else "Accepted"
+        print(f"{action} T1 written atomically to {calibration_path}")
     else:
         print(
             "WRITE_ACCEPTED_FIT=False: calibration.yml was not changed. "

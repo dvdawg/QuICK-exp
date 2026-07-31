@@ -12,7 +12,7 @@ from scipy.optimize import least_squares
 from scipy.special import expit
 
 from .errors import AnalysisError
-from .fit_calibration import write_calibration_records
+from .fit_calibration import annotate_forced_write, write_calibration_records
 from .fit_stats import pinned_parameters, r_squared
 from .native_map import NativeMap, load_native_map
 from .resonator_flux import extract_notch_centers
@@ -294,14 +294,18 @@ def accept_punchout_fit(
     minimum_plateau_rows: int = 2,
     minimum_shift_over_step: float = 2.0,
     maximum_transition_width_db: float = 15.0,
+    force_write: bool = False,
 ) -> Path:
-    if not fit.passes(
+    gates_passed = fit.passes(
         minimum_plateau_rows=minimum_plateau_rows,
         minimum_shift_over_step=minimum_shift_over_step,
         maximum_transition_width_db=maximum_transition_width_db,
-    ):
-        raise AnalysisError("punchout fit did not pass acceptance gates")
-    return write_calibration_records(
-        project_root,
-        {"defaults.r_power": punchout_calibration_record(fit)},
     )
+    if not gates_passed and not force_write:
+        raise AnalysisError("punchout fit did not pass acceptance gates")
+    updates = annotate_forced_write(
+        {"defaults.r_power": punchout_calibration_record(fit)},
+        force_write=force_write,
+        gates_passed=gates_passed,
+    )
+    return write_calibration_records(project_root, updates)

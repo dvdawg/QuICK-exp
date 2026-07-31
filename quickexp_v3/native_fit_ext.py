@@ -11,7 +11,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from .errors import AnalysisError
-from .fit_calibration import write_calibration_records
+from .fit_calibration import annotate_forced_write, write_calibration_records
 from .fit_stats import bic, bootstrap_1d, pinned_parameters, r_squared
 from .native_fit import _fit_signal, load_native_trace
 from .trace_qc import qc_trace
@@ -321,15 +321,19 @@ def accept_echo_fit(
     minimum_r_squared: float = 0.70,
     minimum_span_over_t: float = 0.75,
     maximum_relative_t_uncertainty: float = 0.25,
+    force_write: bool = False,
 ) -> Path:
-    if not fit.passes(
+    gates_passed = fit.passes(
         minimum_r_squared=minimum_r_squared,
         minimum_span_over_t=minimum_span_over_t,
         maximum_relative_t_uncertainty=maximum_relative_t_uncertainty,
-    ):
+    )
+    if not gates_passed and not force_write:
         raise AnalysisError("echo fit did not pass acceptance gates")
     cycle = int(fit.parameters["cycle"])
-    return write_calibration_records(
-        project_root,
+    updates = annotate_forced_write(
         {f"derived.t2_echo_cycle_{cycle}": echo_calibration_record(fit)},
+        force_write=force_write,
+        gates_passed=gates_passed,
     )
+    return write_calibration_records(project_root, updates)

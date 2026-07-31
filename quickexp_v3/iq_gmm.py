@@ -14,7 +14,7 @@ from scipy.stats import norm
 import yaml
 
 from .errors import AnalysisError
-from .fit_calibration import write_calibration_records
+from .fit_calibration import annotate_forced_write, write_calibration_records
 from .util import utc_now
 
 
@@ -457,17 +457,21 @@ def accept_iq_gmm(
     minimum_fidelity: float = 0.80,
     minimum_shots_per_state: int = 2000,
     maximum_angle_bootstrap_std: float = 0.2,
+    force_write: bool = False,
 ) -> Path:
-    if not fit.passes(
+    gates_passed = fit.passes(
         minimum_fidelity=minimum_fidelity,
         minimum_shots_per_state=minimum_shots_per_state,
         maximum_angle_bootstrap_std=maximum_angle_bootstrap_std,
-    ):
-        raise AnalysisError("IQ GMM fit did not pass acceptance gates")
-    return write_calibration_records(
-        project_root,
-        iq_calibration_records(fit, source_csv),
     )
+    if not gates_passed and not force_write:
+        raise AnalysisError("IQ GMM fit did not pass acceptance gates")
+    updates = annotate_forced_write(
+        iq_calibration_records(fit, source_csv),
+        force_write=force_write,
+        gates_passed=gates_passed,
+    )
+    return write_calibration_records(project_root, updates)
 
 
 @dataclass(frozen=True)

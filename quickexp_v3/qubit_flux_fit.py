@@ -12,7 +12,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import least_squares
 
 from .errors import AnalysisError
-from .fit_calibration import write_calibration_records
+from .fit_calibration import annotate_forced_write, write_calibration_records
 from .fit_stats import oriented_rotate_iq, pinned_parameters, r_squared
 from .flux_lookup import register_model
 from .native_map import load_native_map
@@ -401,11 +401,18 @@ def accept_qubit_flux_fit(
     minimum_ridge_rows: int = 6,
     minimum_r_squared: float = 0.95,
     maximum_rmse_mhz: float = 5.0,
+    force_write: bool = False,
 ) -> Path:
-    if not fit.passes(
+    gates_passed = fit.passes(
         minimum_ridge_rows=minimum_ridge_rows,
         minimum_r_squared=minimum_r_squared,
         maximum_rmse_mhz=maximum_rmse_mhz,
-    ):
+    )
+    if not gates_passed and not force_write:
         raise AnalysisError("qubit flux fit did not pass acceptance gates")
-    return write_calibration_records(project_root, qubit_flux_records(fit))
+    updates = annotate_forced_write(
+        qubit_flux_records(fit),
+        force_write=force_write,
+        gates_passed=gates_passed,
+    )
+    return write_calibration_records(project_root, updates)

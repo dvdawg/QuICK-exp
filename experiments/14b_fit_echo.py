@@ -27,6 +27,7 @@ MINIMUM_R_SQUARED = 0.70
 MINIMUM_SPAN_OVER_T = 0.75
 MAXIMUM_RELATIVE_T_UNCERTAINTY = 0.25
 WRITE_ACCEPTED_FIT = False
+FORCE_WRITE = False
 SHOW_PLOT = True
 # ============================================================================
 
@@ -68,15 +69,19 @@ def main():
     )
     print(f"Acceptance gates: {'PASS' if passes else 'FAIL'}")
     figure = plot_decay_fit(fit)
-    if WRITE_ACCEPTED_FIT:
+    if WRITE_ACCEPTED_FIT or FORCE_WRITE:
+        if FORCE_WRITE and not passes:
+            print("WARNING: FORCE_WRITE=True is bypassing failed acceptance gates.")
         path = accept_echo_fit(
             PROJECT_ROOT,
             fit,
             minimum_r_squared=MINIMUM_R_SQUARED,
             minimum_span_over_t=MINIMUM_SPAN_OVER_T,
             maximum_relative_t_uncertainty=MAXIMUM_RELATIVE_T_UNCERTAINTY,
+            force_write=FORCE_WRITE,
         )
-        print(f"Accepted echo record written atomically to {path}")
+        action = "Force-written" if FORCE_WRITE else "Accepted"
+        print(f"{action} echo record written atomically to {path}")
     else:
         print("WRITE_ACCEPTED_FIT=False: calibration.yml was not changed.")
     if SHOW_PLOT:

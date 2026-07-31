@@ -27,6 +27,7 @@ MINIMUM_PLATEAU_ROWS = 2
 MINIMUM_SHIFT_OVER_STEP = 2.0
 MAXIMUM_TRANSITION_WIDTH_DB = 15.0
 WRITE_ACCEPTED_FIT = False
+FORCE_WRITE = False
 SHOW_PLOT = True
 # ============================================================================
 
@@ -76,15 +77,19 @@ def main():
     )
     print(f"Acceptance gates: {'PASS' if passes else 'FAIL'}")
     figure = plot_punchout_fit(fit)
-    if WRITE_ACCEPTED_FIT:
+    if WRITE_ACCEPTED_FIT or FORCE_WRITE:
+        if FORCE_WRITE and not passes:
+            print("WARNING: FORCE_WRITE=True is bypassing failed acceptance gates.")
         path = accept_punchout_fit(
             PROJECT_ROOT,
             fit,
             minimum_plateau_rows=MINIMUM_PLATEAU_ROWS,
             minimum_shift_over_step=MINIMUM_SHIFT_OVER_STEP,
             maximum_transition_width_db=MAXIMUM_TRANSITION_WIDTH_DB,
+            force_write=FORCE_WRITE,
         )
-        print(f"Accepted r_power written atomically to {path}")
+        action = "Force-written" if FORCE_WRITE else "Accepted"
+        print(f"{action} r_power written atomically to {path}")
     else:
         print("WRITE_ACCEPTED_FIT=False: calibration.yml was not changed.")
     if SHOW_PLOT:

@@ -34,6 +34,8 @@ MAXIMUM_RELATIVE_PI_UNCERTAINTY = 0.25
 
 # Safety latch: inspect the plot/statistics first, then change this to True.
 WRITE_ACCEPTED_FIT = False
+# Independent manual override: writes even when acceptance gates fail.
+FORCE_WRITE = False
 SHOW_PLOT = True
 # ============================================================================
 
@@ -96,7 +98,9 @@ def main():
     )
 
     figure = plot_rabi_fit(fit)
-    if WRITE_ACCEPTED_FIT:
+    if WRITE_ACCEPTED_FIT or FORCE_WRITE:
+        if FORCE_WRITE and not passes:
+            print("WARNING: FORCE_WRITE=True is bypassing failed acceptance gates.")
         calibration_path = accept_rabi_fit(
             PROJECT_ROOT,
             fit,
@@ -105,9 +109,11 @@ def main():
             maximum_relative_pi_uncertainty=(
                 MAXIMUM_RELATIVE_PI_UNCERTAINTY
             ),
+            force_write=FORCE_WRITE,
         )
+        action = "Force-written" if FORCE_WRITE else "Accepted"
         print(
-            f"Accepted {fit.variable} written atomically to "
+            f"{action} {fit.variable} written atomically to "
             f"{calibration_path}"
         )
     else:

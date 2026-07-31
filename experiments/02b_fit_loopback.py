@@ -36,6 +36,8 @@ MAXIMUM_EDGE_UNCERTAINTY_US = 0.02
 
 # Safety latch: inspect the plot/statistics first, then change this to True.
 WRITE_ACCEPTED_FIT = False
+# Independent manual override: writes even when acceptance gates fail.
+FORCE_WRITE = False
 SHOW_PLOT = True
 # ============================================================================
 
@@ -85,15 +87,19 @@ def main():
         f"edge uncertainty <= {MAXIMUM_EDGE_UNCERTAINTY_US} us)"
     )
     figure = plot_loopback_fit(fit)
-    if WRITE_ACCEPTED_FIT:
+    if WRITE_ACCEPTED_FIT or FORCE_WRITE:
+        if FORCE_WRITE and not passes:
+            print("WARNING: FORCE_WRITE=True is bypassing failed acceptance gates.")
         calibration_path = accept_loopback_fit(
             PROJECT_ROOT,
             fit,
             minimum_edge_snr=MINIMUM_EDGE_SNR,
             minimum_r_squared=MINIMUM_R_SQUARED,
             maximum_edge_uncertainty_us=MAXIMUM_EDGE_UNCERTAINTY_US,
+            force_write=FORCE_WRITE,
         )
-        print(f"Accepted r_offset written atomically to {calibration_path}")
+        action = "Force-written" if FORCE_WRITE else "Accepted"
+        print(f"{action} r_offset written atomically to {calibration_path}")
     else:
         print(
             "WRITE_ACCEPTED_FIT=False: calibration.yml was not changed. "

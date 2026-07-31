@@ -41,6 +41,8 @@ MAXIMUM_RMSE_MHZ = 0.20
 
 # Safety latch: inspect the plot/statistics first, then change this to True.
 WRITE_ACCEPTED_FIT = False
+# Independent manual override: writes even when acceptance gates fail.
+FORCE_WRITE = False
 PREVIEW_Z_GAIN = 0.0
 SHOW_PLOT = True
 # ============================================================================
@@ -120,14 +122,18 @@ def main():
         print(f"Dropped incomplete/non-finite Z rows: {fit.dropped_z_gain}")
 
     figure = plot_resonator_flux_fit(fit)
-    if WRITE_ACCEPTED_FIT:
+    if WRITE_ACCEPTED_FIT or FORCE_WRITE:
+        if FORCE_WRITE and not passes:
+            print("WARNING: FORCE_WRITE=True is bypassing failed acceptance gates.")
         calibration_path = accept_fit(
             PROJECT_ROOT,
             fit,
             minimum_r_squared=MINIMUM_R_SQUARED,
             maximum_rmse_mhz=MAXIMUM_RMSE_MHZ,
+            force_write=FORCE_WRITE,
         )
-        print(f"Accepted calibration written atomically to {calibration_path}")
+        action = "Force-written" if FORCE_WRITE else "Accepted"
+        print(f"{action} calibration written atomically to {calibration_path}")
     else:
         print(
             "WRITE_ACCEPTED_FIT=False: calibration.yml was not changed. "

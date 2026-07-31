@@ -160,6 +160,41 @@ def test_loopback_fit_recovers_edge_and_adds_existing_offset(tmp_path):
     assert fit.statistics["r_squared"] > 0.999
 
 
+def test_loopback_gate_accepts_usable_edge_outside_middle_90_percent(
+    tmp_path,
+):
+    time = np.linspace(0.0, 10.0, 3072)
+    edge_us = 0.48
+    signal = 0.05 + 1.2 * 0.5 * (
+        1.0 + np.tanh((time - edge_us) / (2.0 * 0.008))
+    )
+    source = write_pair(
+        tmp_path / "LoopBackNearStart.csv",
+        quick_class="LoopBack",
+        axis_label="Time",
+        axis_unit="us",
+        x=time,
+        signal=signal,
+        var={"r_offset": 0.0},
+    )
+
+    fit = fit_loopback(source)
+    gates = fit.acceptance_gates(
+        minimum_edge_snr=5.0,
+        minimum_r_squared=0.85,
+        maximum_edge_uncertainty_us=0.02,
+    )
+
+    assert fit.parameters["edge_in_trace_us"] < 0.05 * np.ptp(time)
+    assert gates["edge_inside_usable_record"] is True
+    assert all(gates.values())
+    assert fit.passes(
+        minimum_edge_snr=5.0,
+        minimum_r_squared=0.85,
+        maximum_edge_uncertainty_us=0.02,
+    )
+
+
 def test_find_latest_native_skips_wrong_class_and_two_dimensional_file(
     tmp_path,
 ):

@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from quickexp_v3.config import ConfigRepository
+from quickexp_v3.errors import AnalysisError
 from quickexp_v3.rabi_fit import (
     accept_rabi_fit,
     find_latest_rabi,
@@ -132,3 +133,33 @@ def test_accept_rabi_fit_updates_calibration_atomically(tmp_path):
     )
     parameters = repository.resolve("t1").expanded_parameters()
     assert parameters["q_length"] == pytest.approx(fit.pi_value)
+
+
+def test_force_write_bypasses_fit_gates_and_is_auditable(tmp_path):
+    for name in (
+        "hardware.example.yml",
+        "presets.example.yml",
+        "calibration.example.yml",
+    ):
+        shutil.copy2(ROOT / name, tmp_path / name)
+    fit = fit_rabi(write_rabi_pair(tmp_path), variable="q_length")
+    thresholds = {
+        "minimum_r_squared": 1.1,
+        "minimum_oscillations": 1.0,
+        "maximum_relative_pi_uncertainty": 0.1,
+    }
+
+    with pytest.raises(AnalysisError, match="not accepted"):
+        accept_rabi_fit(tmp_path, fit, **thresholds)
+
+    target = accept_rabi_fit(
+        tmp_path,
+        fit,
+        **thresholds,
+        force_write=True,
+    )
+
+    document = yaml.safe_load(target.read_text(encoding="utf-8"))
+    quality = document["records"]["defaults"]["q_length"]["quality"]
+    assert quality["force_written"] is True
+    assert quality["acceptance_gates_passed"] is False

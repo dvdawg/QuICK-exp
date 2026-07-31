@@ -516,25 +516,29 @@ def _n1(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
         overrides=overrides,
     )
     fit = fit_loopback(csv_path)
-    passed = fit.passes(
+    checks = fit.acceptance_gates(
         minimum_edge_snr=5.0,
         minimum_r_squared=0.85,
         maximum_edge_uncertainty_us=0.02,
     )
     edge = float(fit.parameters["edge_in_trace_us"])
-    span = float(np.ptp(fit.time_us))
-    middle = fit.time_us[0] + 0.05 * span < edge < fit.time_us[-1] - 0.05 * span
+    step = float(np.median(np.diff(fit.time_us)))
+    edge_margin = min(edge - fit.time_us[0], fit.time_us[-1] - edge)
     gates = {
-        "edge_snr": _gate(fit.statistics["edge_snr"], ">= 5", fit.statistics["edge_snr"] >= 5),
-        "r_squared": _gate(fit.statistics["r_squared"], ">= 0.85", fit.statistics["r_squared"] >= 0.85),
+        "edge_snr": _gate(fit.statistics["edge_snr"], ">= 5", checks["edge_snr"]),
+        "r_squared": _gate(fit.statistics["r_squared"], ">= 0.85", checks["r_squared"]),
         "edge_uncertainty_us": _gate(
             fit.parameters["edge_uncertainty_us"],
             "<= 0.02",
-            fit.parameters["edge_uncertainty_us"] <= 0.02,
+            checks["edge_uncertainty_us"],
         ),
-        "edge_inside_middle_90_percent": _gate(edge, "middle 90%", middle),
+        "edge_inside_usable_record": _gate(
+            edge_margin,
+            f"> {2.0 * step:.9g} us (two sample bins from either edge)",
+            checks["edge_inside_usable_record"],
+        ),
     }
-    passed = bool(passed and middle)
+    passed = bool(all(checks.values()))
     _fit_event(
         ctx,
         spec.node_id,

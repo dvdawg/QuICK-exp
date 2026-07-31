@@ -41,6 +41,8 @@ MAXIMUM_CENTER_UNCERTAINTY_FRACTION_OF_FWHM = 0.30
 
 # Safety latch: inspect the plot/statistics first, then change this to True.
 WRITE_ACCEPTED_FIT = False
+# Independent manual override: writes even when acceptance gates fail.
+FORCE_WRITE = False
 SHOW_PLOT = True
 # ============================================================================
 
@@ -107,7 +109,9 @@ def main():
         f"{MAXIMUM_CENTER_UNCERTAINTY_FRACTION_OF_FWHM})"
     )
     figure = plot_spectroscopy_fit(fit)
-    if WRITE_ACCEPTED_FIT:
+    if WRITE_ACCEPTED_FIT or FORCE_WRITE:
+        if FORCE_WRITE and not passes:
+            print("WARNING: FORCE_WRITE=True is bypassing failed acceptance gates.")
         calibration_path = accept_spectroscopy_fit(
             PROJECT_ROOT,
             fit,
@@ -116,8 +120,10 @@ def main():
             maximum_center_uncertainty_fraction_of_fwhm=(
                 MAXIMUM_CENTER_UNCERTAINTY_FRACTION_OF_FWHM
             ),
+            force_write=FORCE_WRITE,
         )
-        print(f"Accepted q_freq written atomically to {calibration_path}")
+        action = "Force-written" if FORCE_WRITE else "Accepted"
+        print(f"{action} q_freq written atomically to {calibration_path}")
     else:
         print(
             "WRITE_ACCEPTED_FIT=False: calibration.yml was not changed. "

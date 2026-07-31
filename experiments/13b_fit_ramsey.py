@@ -36,6 +36,8 @@ MAXIMUM_RELATIVE_T2_UNCERTAINTY = 0.30
 
 # WRITE_ACCEPTED_FIT saves records.derived.t2_ramsey.
 WRITE_ACCEPTED_FIT = False
+# Independent manual override: writes even when acceptance gates fail.
+FORCE_WRITE = False
 # This separate latch additionally replaces records.defaults.q_freq.
 UPDATE_Q_FREQUENCY = False
 # +1 is the Quick/notebook convention; -1 selects the reported alternative.
@@ -107,7 +109,9 @@ def main():
         f"{MAXIMUM_RELATIVE_T2_UNCERTAINTY:.1%})"
     )
     figure = plot_ramsey_fit(fit)
-    if WRITE_ACCEPTED_FIT:
+    if WRITE_ACCEPTED_FIT or FORCE_WRITE:
+        if FORCE_WRITE and not passes:
+            print("WARNING: FORCE_WRITE=True is bypassing failed acceptance gates.")
         calibration_path = accept_ramsey_fit(
             PROJECT_ROOT,
             fit,
@@ -118,17 +122,19 @@ def main():
             ),
             update_q_frequency=UPDATE_Q_FREQUENCY,
             correction_sign=Q_FREQUENCY_CORRECTION_SIGN,
+            force_write=FORCE_WRITE,
         )
-        print(f"Accepted Ramsey result written atomically to {calibration_path}")
+        action = "Force-written" if FORCE_WRITE else "Accepted"
+        print(f"{action} Ramsey result written atomically to {calibration_path}")
     else:
         print(
             "WRITE_ACCEPTED_FIT=False: calibration.yml was not changed. "
             "Inspect the diagnostics, then enable the latch to save this fit."
         )
-    if UPDATE_Q_FREQUENCY and not WRITE_ACCEPTED_FIT:
+    if UPDATE_Q_FREQUENCY and not (WRITE_ACCEPTED_FIT or FORCE_WRITE):
         print(
             "UPDATE_Q_FREQUENCY=True has no effect until "
-            "WRITE_ACCEPTED_FIT is also True."
+            "WRITE_ACCEPTED_FIT or FORCE_WRITE is also True."
         )
     if SHOW_PLOT:
         plt.show()

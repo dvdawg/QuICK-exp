@@ -12,7 +12,7 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import least_squares
 from .errors import AnalysisError, ConfigError
-from .fit_calibration import write_calibration_records
+from .fit_calibration import annotate_forced_write, write_calibration_records
 from .util import to_builtin, utc_now
 
 
@@ -779,12 +779,14 @@ def accept_fit(
     *,
     minimum_r_squared: float,
     maximum_rmse_mhz: float,
+    force_write: bool = False,
 ) -> Path:
     """Atomically install an accepted fit or sampled lookup."""
-    if not fit.passes(
+    gates_passed = fit.passes(
         minimum_r_squared=minimum_r_squared,
         maximum_rmse_mhz=maximum_rmse_mhz,
-    ):
+    )
+    if not gates_passed and not force_write:
         if fit.model == MODEL_NAME:
             detail = (
                 f"R^2={fit.statistics['r_squared']:.6f} "
@@ -796,9 +798,11 @@ def accept_fit(
             detail = "sampled lookup contains invalid values"
         raise AnalysisError(f"calibration was not accepted: {detail}")
 
-    return write_calibration_records(
-        project_root,
+    updates = annotate_forced_write(
         {
             "lookups.resonator_vs_flux": calibration_record(fit),
         },
+        force_write=force_write,
+        gates_passed=gates_passed,
     )
+    return write_calibration_records(project_root, updates)

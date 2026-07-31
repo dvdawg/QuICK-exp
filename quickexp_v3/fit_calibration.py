@@ -165,6 +165,26 @@ def write_calibration_records(
     return _validate_and_write(root, target, document)
 
 
+def annotate_forced_write(
+    updates: Mapping[str, Mapping[str, Any]],
+    *,
+    force_write: bool,
+    gates_passed: bool,
+) -> Mapping[str, Mapping[str, Any]]:
+    """Stamp an explicit manual gate override into calibration records."""
+    if not force_write:
+        return updates
+    annotated = deepcopy(dict(updates))
+    for record in annotated.values():
+        quality = record.setdefault("quality", {})
+        if not isinstance(quality, dict):
+            quality = {"fit_quality": to_builtin(quality)}
+            record["quality"] = quality
+        quality["force_written"] = True
+        quality["acceptance_gates_passed"] = bool(gates_passed)
+    return annotated
+
+
 def _proposal_identity(proposal: Mapping[str, Any]) -> tuple:
     provenance = proposal.get("provenance")
     provenance = provenance if isinstance(provenance, Mapping) else {}

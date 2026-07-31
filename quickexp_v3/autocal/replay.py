@@ -123,27 +123,12 @@ def _lookup_prediction(
 
 def _evaluate_n1(paths: Sequence[Path]) -> tuple[bool, dict]:
     fit = fit_loopback(paths[-1])
-    edge = float(fit.parameters["edge_in_trace_us"])
-    span = float(np.ptp(fit.time_us))
-    middle = (
-        fit.time_us[0] + 0.05 * span
-        < edge
-        < fit.time_us[-1] - 0.05 * span
-    )
-    gates = {
-        "edge_snr": fit.statistics["edge_snr"] >= 5.0,
-        "r_squared": fit.statistics["r_squared"] >= 0.85,
-        "edge_uncertainty_us": (
-            fit.parameters["edge_uncertainty_us"] <= 0.02
-        ),
-        "edge_inside_middle_90_percent": middle,
-    }
-    passed = fit.passes(
+    gates = fit.acceptance_gates(
         minimum_edge_snr=5.0,
         minimum_r_squared=0.85,
         maximum_edge_uncertainty_us=0.02,
     )
-    return bool(passed and middle), gates
+    return bool(all(gates.values())), dict(gates)
 
 
 def _evaluate_n2(paths: Sequence[Path]) -> tuple[bool, dict]:

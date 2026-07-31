@@ -45,6 +45,8 @@ MAXIMUM_CENTER_UNCERTAINTY_FRACTION_OF_FWHM = 0.25
 
 # Safety latch: inspect the plot/statistics first, then change this to True.
 WRITE_ACCEPTED_FIT = False
+# Independent manual override: writes even when acceptance gates fail.
+FORCE_WRITE = False
 SHOW_PLOT = True
 # ============================================================================
 
@@ -128,7 +130,9 @@ def main():
         if USE_COMPLEX_NOTCH
         else plot_spectroscopy_fit(fit)
     )
-    if WRITE_ACCEPTED_FIT:
+    if WRITE_ACCEPTED_FIT or FORCE_WRITE:
+        if FORCE_WRITE and not passes:
+            print("WARNING: FORCE_WRITE=True is bypassing failed acceptance gates.")
         if USE_COMPLEX_NOTCH:
             calibration_path = accept_notch_fit(
                 PROJECT_ROOT,
@@ -138,6 +142,7 @@ def main():
                 minimum_edge_distance_over_fwhm=(
                     MINIMUM_EDGE_DISTANCE_OVER_FWHM
                 ),
+                force_write=FORCE_WRITE,
             )
         else:
             calibration_path = accept_spectroscopy_fit(
@@ -148,8 +153,10 @@ def main():
                 maximum_center_uncertainty_fraction_of_fwhm=(
                     MAXIMUM_CENTER_UNCERTAINTY_FRACTION_OF_FWHM
                 ),
+                force_write=FORCE_WRITE,
             )
-        print(f"Accepted r_freq written atomically to {calibration_path}")
+        action = "Force-written" if FORCE_WRITE else "Accepted"
+        print(f"{action} r_freq written atomically to {calibration_path}")
     else:
         print(
             "WRITE_ACCEPTED_FIT=False: calibration.yml was not changed. "

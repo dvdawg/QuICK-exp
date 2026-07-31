@@ -26,6 +26,7 @@ MINIMUM_FIDELITY = 0.80
 MINIMUM_SHOTS_PER_STATE = 2000
 MAXIMUM_ANGLE_BOOTSTRAP_STD = 0.20
 WRITE_ACCEPTED_FIT = False
+FORCE_WRITE = False
 SHOW_PLOT = True
 # ============================================================================
 
@@ -64,7 +65,9 @@ def main():
     )
     print(f"Acceptance gates: {'PASS' if passes else 'FAIL'}")
     figure = plot_iq_gmm(fit, *columns)
-    if WRITE_ACCEPTED_FIT:
+    if WRITE_ACCEPTED_FIT or FORCE_WRITE:
+        if FORCE_WRITE and not passes:
+            print("WARNING: FORCE_WRITE=True is bypassing failed acceptance gates.")
         path = accept_iq_gmm(
             PROJECT_ROOT,
             fit,
@@ -72,8 +75,10 @@ def main():
             minimum_fidelity=MINIMUM_FIDELITY,
             minimum_shots_per_state=MINIMUM_SHOTS_PER_STATE,
             maximum_angle_bootstrap_std=MAXIMUM_ANGLE_BOOTSTRAP_STD,
+            force_write=FORCE_WRITE,
         )
-        print(f"Accepted IQ records written atomically to {path}")
+        action = "Force-written" if FORCE_WRITE else "Accepted"
+        print(f"{action} IQ records written atomically to {path}")
     else:
         print("WRITE_ACCEPTED_FIT=False: calibration.yml was not changed.")
     if SHOW_PLOT:

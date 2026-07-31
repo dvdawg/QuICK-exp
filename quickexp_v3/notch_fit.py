@@ -12,7 +12,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import least_squares
 
 from .errors import AnalysisError, ConfigError
-from .fit_calibration import write_calibration_records
+from .fit_calibration import annotate_forced_write, write_calibration_records
 from .fit_stats import (
     bic,
     oriented_rotate_iq,
@@ -454,17 +454,21 @@ def accept_notch_fit(
     minimum_r_squared: float = 0.90,
     minimum_contrast_snr: float = 5.0,
     minimum_edge_distance_over_fwhm: float = 1.0,
+    force_write: bool = False,
 ) -> Path:
-    if not fit.passes(
+    gates_passed = fit.passes(
         minimum_r_squared=minimum_r_squared,
         minimum_contrast_snr=minimum_contrast_snr,
         minimum_edge_distance_over_fwhm=minimum_edge_distance_over_fwhm,
-    ):
-        raise AnalysisError("complex notch fit did not pass acceptance gates")
-    return write_calibration_records(
-        project_root,
-        {"defaults.r_freq": notch_calibration_record(fit)},
     )
+    if not gates_passed and not force_write:
+        raise AnalysisError("complex notch fit did not pass acceptance gates")
+    updates = annotate_forced_write(
+        {"defaults.r_freq": notch_calibration_record(fit)},
+        force_write=force_write,
+        gates_passed=gates_passed,
+    )
+    return write_calibration_records(project_root, updates)
 
 
 def _lorentz_model(x, parameters, components, reference):

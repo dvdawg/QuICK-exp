@@ -27,6 +27,7 @@ MINIMUM_RIDGE_ROWS = 6
 MINIMUM_R_SQUARED = 0.95
 MAXIMUM_RMSE_MHZ = 5.0
 WRITE_ACCEPTED_FIT = False
+FORCE_WRITE = False
 SHOW_PLOT = True
 # ============================================================================
 
@@ -84,15 +85,19 @@ def main():
     print(f"Identifiability: {dict(fit.identifiable)}")
     print(f"Acceptance gates: {'PASS' if passes else 'FAIL'}")
     figure = plot_qubit_flux_fit(fit)
-    if WRITE_ACCEPTED_FIT:
+    if WRITE_ACCEPTED_FIT or FORCE_WRITE:
+        if FORCE_WRITE and not passes:
+            print("WARNING: FORCE_WRITE=True is bypassing failed acceptance gates.")
         path = accept_qubit_flux_fit(
             PROJECT_ROOT,
             fit,
             minimum_ridge_rows=MINIMUM_RIDGE_ROWS,
             minimum_r_squared=MINIMUM_R_SQUARED,
             maximum_rmse_mhz=MAXIMUM_RMSE_MHZ,
+            force_write=FORCE_WRITE,
         )
-        print(f"Accepted qubit-flux records written atomically to {path}")
+        action = "Force-written" if FORCE_WRITE else "Accepted"
+        print(f"{action} qubit-flux records written atomically to {path}")
     else:
         print("WRITE_ACCEPTED_FIT=False: calibration.yml was not changed.")
     if SHOW_PLOT:
