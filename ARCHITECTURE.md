@@ -100,8 +100,14 @@ sample calculation intentionally matches Quick 0.7.2's Mercator conversion.
 Deterministic `ConfigError` failures bypass acquisition recovery and retry.
 
 Native Cartesian sweeps power the resonator punchout, qubit-gain scan, and
-Rabi/Ramsey chevrons. Flux remains an outer loop because generator 15 must be
-held and reapplied after recovery. Row acquisitions disable their individual
+Rabi/Ramsey chevrons. Quick registers its sweeps in constructor-argument order,
+so each experiment's `axis_candidates` tuple declares the loop nesting outermost
+first and the frequency axis is always declared last: power, gain, flux, and
+delay are held while a full spectrum is stepped, never the reverse. Parameter
+insertion order is deliberately not consulted, since it only reflects the key
+order of `hardware.defaults`. Flux remains an outer loop because generator 15
+must be held and reapplied after recovery. Row acquisitions disable their
+individual
 Savers; one direct Quick `Saver` writes the assembled Z-by-inner-axis table,
 matching the historical `ResVsZ_held_bias` and
 `QubitSpecVsZ_fitted_readout` files.

@@ -21,12 +21,14 @@ REPLAY_SESSION = None
 
 The supported targets are:
 
-| Target | Nodes |
-|---|---|
+
+| Target            | Nodes                                                                                                           |
+| ----------------- | --------------------------------------------------------------------------------------------------------------- |
 | `full_cold_start` | ports, timing, punchout, resonator map/working point, qubit frequency, pi pulse, IQ threshold, T1, Ramsey, Echo |
-| `flux_point` | resonator/qubit working point, pi pulse, IQ threshold, coherence |
-| `readout_only` | resonator working point and IQ threshold; optimization escalates only when fidelity is below target |
-| `coherence_only` | T1, two-point Ramsey sign check, Echo |
+| `flux_point`      | resonator/qubit working point, pi pulse, IQ threshold, coherence                                                |
+| `readout_only`    | resonator working point and IQ threshold; optimization escalates only when fidelity is below target             |
+| `coherence_only`  | T1, two-point Ramsey sign check, Echo                                                                           |
+
 
 Offline runs use one persistent `DeviceModel`, so a frequency found by one node
 is the ground truth consumed by downstream acquisitions. Synthetic signal data
@@ -36,10 +38,10 @@ CSV/YML form and fitted from those files.
 ## Autonomy
 
 - L0 always proposes and never promotes. This is the required level for initial
-  hardware rollout.
+hardware rollout.
 - L1 promotes only allowlisted records within the hardware policy tolerance.
 - L2 promotes all passing records except hard stops; configured tolerances still
-  apply.
+apply.
 
 `defaults.r_offset`, `lookups.resonator_vs_flux`, and
 `lookups.qubit_vs_flux` are hard stops at every level. Ramsey can never promote
@@ -72,9 +74,9 @@ Each session contains:
 
 - `state.yml`: target, working values, node attempts/statuses, and budget;
 - `decisions.jsonl`: append-only decisions and native-file references, with no
-  signals or arrays;
+signals or arrays;
 - `native/`: simulation-only native pairs. Live data remains in
-  `storage.quick_native_root`.
+`storage.quick_native_root`.
 
 Set `REPLAY_SESSION` to a session directory for a read-only audit replay. Replay
 re-runs every logged fitter from its referenced native CSV/YML pair and fails
@@ -105,8 +107,8 @@ Before unattended use:
 
 1. complete the authored-program hardware gates in `plans/20-pulses.md`;
 2. run `readout_only`, then `flux_point`, then `full_cold_start` at L0 with an
-   operator watching;
-3. review every native trace and decision event through 92;
+  operator watching;
+3. review every native trace and decision event throuxgh 92;
 4. tune thresholds only from observed repeatability;
 5. enable L1 first for `coherence_only`, then expand cautiously.
 

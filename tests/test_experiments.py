@@ -68,6 +68,29 @@ def test_chevrons_have_two_native_quick_axes():
     duration = get("rabi_chevron").build(repo.resolve("rabi_chevron_duration"))
     amplitude = get("rabi_chevron").build(repo.resolve("rabi_chevron_amplitude"))
     ramsey = get("ramsey_chevron").build(repo.resolve("ramsey_chevron"))
-    assert duration.axes == ("q_freq", "q_length")
-    assert amplitude.axes == ("q_freq", "q_gain")
-    assert ramsey.axes == ("q_freq", "time")
+    assert duration.axes == ("q_length", "q_freq")
+    assert amplitude.axes == ("q_gain", "q_freq")
+    assert ramsey.axes == ("time", "q_freq")
+
+
+def test_two_dimensional_sweeps_step_frequency_innermost():
+    # Quick registers the first constructor sweep as the outer loop. Frequency
+    # must therefore be declared last so each slow-axis point is held while a
+    # full spectrum is taken, not the reverse.
+    repo = repository()
+    punchout = get("resonator_spectroscopy").build(repo.resolve("resonator_power"))
+    gain_scan = get("qubit_spectroscopy").build(
+        repo.resolve(
+            "qubit_fine",
+            overrides={"q_gain": {"start": 0.02, "stop": 1.0, "points": 9}},
+        )
+    )
+    flux_scan = get("two_tone_zpa").build(repo.resolve("two_tone_zpa"))
+    assert punchout.axes == ("r_power", "r_freq")
+    assert gain_scan.axes == ("q_gain", "q_freq")
+    assert flux_scan.axes == ("z_gain", "q_freq")
+
+
+def test_flux_and_delay_maps_hold_the_bias_on_the_outer_axis():
+    plan = get("t1_zpa").build(repository().resolve("t1_zpa"))
+    assert plan.axes == ("z_gain", "time")

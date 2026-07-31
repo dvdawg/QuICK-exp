@@ -9,7 +9,7 @@ from .ramsey import Ramsey
 
 class RamseyChevron(Ramsey):
     name = "ramsey_chevron"
-    axis_candidates = ("q_freq", "time")
+    axis_candidates = ("time", "q_freq")
 
     def build(self, config):
         plan = Experiment.build(self, config)

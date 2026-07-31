@@ -25,7 +25,7 @@ class TwoToneZPA(Experiment):
         "z_length",
         "z_settle",
     )
-    axis_candidates = ("q_freq", "z_gain")
+    axis_candidates = ("z_gain", "q_freq")
     default_run_options = {"silent": True, "dB": False, "population": False}
 
     def build(self, config):

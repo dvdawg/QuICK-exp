@@ -55,6 +55,10 @@ class Experiment:
     name = ""
     quick_class = ""
     required: Tuple[str, ...] = ()
+    # Sweepable variables, ordered outermost loop first. Whichever of these the
+    # resolved preset expands to an array becomes a Quick sweep in this order,
+    # so a frequency axis belongs last: every slower variable is held while a
+    # full spectrum is acquired.
     axis_candidates: Tuple[str, ...] = ()
     default_signal_names: Tuple[str, ...] = ("amplitude", "phase", "i", "q")
     default_run_options: Mapping[str, Any] = {"silent": True}
@@ -77,14 +81,16 @@ class Experiment:
         return parameters
 
     def _axes(self, parameters: Mapping[str, Any]) -> Tuple[str, ...]:
-        candidates = set(self.axis_candidates)
+        # Quick registers its sweeps in constructor-argument order, so the first
+        # axis is the outer loop and the last is stepped fastest. Follow the
+        # subclass's declared nesting rather than parameter insertion order,
+        # which merely reflects the key order of hardware.defaults and would put
+        # frequency outside the gain/power/flux axis it should be held against.
         axes = []
-        # Quick builds its sweep list from variable insertion order. Preserve
-        # that order so decoded columns are named exactly as Quick emitted them.
-        for name, value in parameters.items():
+        for name in self.axis_candidates:
+            value = parameters.get(name)
             if (
-                name in candidates
-                and isinstance(value, np.ndarray)
+                isinstance(value, np.ndarray)
                 and value.ndim == 1
                 and value.size > 1
             ):

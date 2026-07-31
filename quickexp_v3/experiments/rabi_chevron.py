@@ -9,7 +9,7 @@ from .rabi import Rabi
 
 class RabiChevron(Rabi):
     name = "rabi_chevron"
-    axis_candidates = ("q_freq", "q_gain", "q_length")
+    axis_candidates = ("q_gain", "q_length", "q_freq")
 
     def build(self, config):
         plan = Experiment.build(self, config)

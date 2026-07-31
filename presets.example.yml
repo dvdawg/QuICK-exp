@@ -61,7 +61,7 @@ presets:
       dB: true
       retry: {max_attempts: 3}
     analysis:
-      note: native Quick rectangular r_freq-by-r_power grid
+      note: native Quick rectangular r_power-by-r_freq grid (r_freq inner)
 
   qubit_coarse:
     experiment: qubit_spectroscopy
@@ -119,7 +119,7 @@ presets:
       population: false
       retry: {max_attempts: 3}
     analysis:
-      note: native authored-program q_freq-by-z_gain grid
+      note: native authored-program z_gain-by-q_freq grid (q_freq inner)
 
   rabi_chevron_duration:
     experiment: rabi_chevron
@@ -138,7 +138,7 @@ presets:
       population: false
       retry: {max_attempts: 3}
     analysis:
-      note: native Quick q_freq-by-q_length grid
+      note: native Quick q_length-by-q_freq grid (q_freq inner)
 
   rabi_chevron_amplitude:
     experiment: rabi_chevron
@@ -157,7 +157,7 @@ presets:
       population: false
       retry: {max_attempts: 3}
     analysis:
-      note: native Quick q_freq-by-q_gain grid
+      note: native Quick q_gain-by-q_freq grid (q_freq inner)
 
   rabi_length:
     experiment: rabi
@@ -258,7 +258,7 @@ presets:
       population: false
       retry: {max_attempts: 3}
     analysis:
-      note: native authored-program T1 delay-by-z_gain grid
+      note: native authored-program T1 z_gain-by-delay grid (delay inner)
 
   ramsey_chevron:
     experiment: ramsey_chevron
@@ -273,7 +273,7 @@ presets:
       population: false
       retry: {max_attempts: 3}
     analysis:
-      note: native Quick q_freq-by-time grid
+      note: native Quick time-by-q_freq grid (q_freq inner)
 
   ramsey:
     experiment: ramsey
