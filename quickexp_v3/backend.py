@@ -36,7 +36,18 @@ QUICK_CLASS_VARIABLES = {
     "T2Echo": frozenset({"time", "cycle", "fringe_freq"}),
     "IQScatter": frozenset({"rr_length"}),
 }
-QUICK_CONFIG_OVERRIDES = ("hard_avg", "soft_avg", "rep")
+QUICK_CONFIG_OVERRIDES = (
+    "hard_avg",
+    "soft_avg",
+    "rep",
+    # Mercator pulse-generator settings are literal config keys rather than
+    # BaseExperiment variables. Keeping them here lets launchers select the
+    # physical DAC Nyquist image without editing the installed Quick package.
+    "p0_nqz",
+    "p1_nqz",
+    "p2_nqz",
+    "p3_nqz",
+)
 QUICK_CONFIG_OVERRIDES_BY_CLASS = {
     # Decimated data for every hard repetition must fit in the on-board
     # accumulation buffer. The installed LoopBack template uses soft_avg and
@@ -57,6 +68,17 @@ QUICK_Q_ENVELOPE_TERMS = {
 }
 _REGISTERED_CLASS_VARIABLES = {}
 _REGISTERED_ENVELOPE_TERMS = {}
+
+
+def _nyquist_zone(name: str, value: Any) -> int:
+    """Coerce a ``p*_nqz`` override to the DAC's zone 1 or zone 2."""
+    try:
+        zone = int(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigError(f"{name} must be Nyquist zone 1 or 2") from error
+    if zone not in (1, 2) or float(value) != zone:
+        raise ConfigError(f"{name} must be Nyquist zone 1 or 2")
+    return zone
 
 
 def register_program_variables(quick_class: str, names: Any) -> frozenset:
@@ -372,6 +394,9 @@ class QuickBackend:
             for name in config_keys
             if name in variables
         }
+        for name, value in config_arguments.items():
+            if name.endswith("_nqz"):
+                config_arguments[name] = _nyquist_zone(name, value)
         constructor_arguments = {**config_arguments, **sweep_arguments}
         experiment = experiment_class(
             var=quick_variables,

@@ -2,9 +2,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from quickexp_v3.backend import QuickBackend
 from quickexp_v3.config import ConfigRepository
+from quickexp_v3.errors import ConfigError
 from quickexp_v3.experiments.registry import get
 
 
@@ -84,6 +86,38 @@ def test_quick_backend_separates_sweeps_from_mercator_config():
     assert FakeRabi.captured_run_arguments["silent"] is False
     assert FakeRabi.captured_run_arguments["population"] is False
     assert result.metadata["native_files"] == []
+
+
+def test_nyquist_zone_override_reaches_mercator_config_not_var():
+    repo = repository()
+    plan = get("rabi").build(repo.resolve("rabi_amplitude")).with_variables(
+        p1_nqz=2,
+    )
+    quick = SimpleNamespace(
+        __version__="test",
+        experiment=SimpleNamespace(Rabi=FakeRabi),
+    )
+    backend = QuickBackend(soc=FakeSoc(), soccfg=object(), quick_module=quick)
+    backend.acquire(plan)
+
+    assert FakeRabi.captured_kwargs["p1_nqz"] == 2
+    # Mercator config keys must stay out of quick.experiment.var.
+    assert "p1_nqz" not in FakeRabi.captured_var
+
+
+@pytest.mark.parametrize("zone", [0, 3, 1.5, "one", None])
+def test_invalid_nyquist_zone_is_rejected_before_acquisition(zone):
+    repo = repository()
+    plan = get("rabi").build(repo.resolve("rabi_amplitude")).with_variables(
+        p1_nqz=zone,
+    )
+    quick = SimpleNamespace(
+        __version__="test",
+        experiment=SimpleNamespace(Rabi=FakeRabi),
+    )
+    backend = QuickBackend(soc=FakeSoc(), soccfg=object(), quick_module=quick)
+    with pytest.raises(ConfigError, match="Nyquist zone 1 or 2"):
+        backend.acquire(plan)
 
 
 def test_quick_backend_close_resets_generators_and_interrupts():

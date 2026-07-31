@@ -19,7 +19,11 @@ from quickexp_v3.naming import number_tag
 # ============================ EDIT THESE ====================================
 LIVE_HARDWARE = True
 Z_GAIN = np.linspace(-0.2, 0.2, 41)
-Q_FREQUENCY_MHZ = np.arange(4000.0, 6000.0, 1.0)
+# One acquisition must stay wholly inside one physical DAC Nyquist zone.
+# Split a wider search into separate runs below and above the boundary, e.g.
+# 4.0-4.7 GHz (zone 1) first, then 4.85-6.0 GHz (zone 2).
+Q_FREQUENCY_MHZ = np.arange(4000.0, 4700.0, 1.0)
+Q_NYQUIST_BOUNDARY_MHZ = 4793.0
 Q_GAIN = 0.3
 Q_LENGTH_US = 10.0
 TRACK_READOUT_FROM_ACCEPTED_FLUX_FIT = True
@@ -31,13 +35,24 @@ SHOW_PLOT = True
 
 
 def main():
+    if np.all(Q_FREQUENCY_MHZ < Q_NYQUIST_BOUNDARY_MHZ):
+        q_nyquist_zone = 1
+    elif np.all(Q_FREQUENCY_MHZ > Q_NYQUIST_BOUNDARY_MHZ):
+        q_nyquist_zone = 2
+    else:
+        raise ValueError(
+            "Q_FREQUENCY_MHZ crosses the "
+            f"{Q_NYQUIST_BOUNDARY_MHZ:.0f} MHz DAC Nyquist boundary. Split "
+            "the search into separate zone-1 and zone-2 runs so the mirror "
+            "image is not measured instead of the requested band."
+        )
     if TRACK_READOUT_FROM_ACCEPTED_FLUX_FIT:
         repository = load_repository(PROJECT_ROOT)
         readout = lambda z: float(resonator_frequency_from_flux(repository, z))
         readout_metadata = repository.calibration["records"]["lookups"][
             "resonator_vs_flux"
         ]
-        title = "QubitSpecVsZ_fitted_readout"
+        title = f"QubitSpecVsZ_nqz{q_nyquist_zone}_fitted_readout"
     else:
         readout = lambda z: FIXED_READOUT_FREQUENCY_MHZ
         readout_metadata = {
@@ -45,7 +60,7 @@ def main():
             "frequency_mhz": float(FIXED_READOUT_FREQUENCY_MHZ),
         }
         title = (
-            "QubitSpecVsZ_fixed_readout_r"
+            f"QubitSpecVsZ_nqz{q_nyquist_zone}_fixed_readout_r"
             + number_tag(FIXED_READOUT_FREQUENCY_MHZ)
         )
     return run_flux_sweep(
@@ -59,6 +74,7 @@ def main():
         readout_metadata=readout_metadata,
         overrides={
             "q_freq": Q_FREQUENCY_MHZ,
+            "p1_nqz": q_nyquist_zone,
             "q_gain": Q_GAIN,
             "q_length": Q_LENGTH_US,
             "hard_avg": HARD_AVG,

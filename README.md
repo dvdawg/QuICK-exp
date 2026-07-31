@@ -114,6 +114,12 @@ supervised L0 sessions before enabling L1. See
    It selects the newest matching CSV by default, extracts each notch with the
    notebook's Gaussian-smoothing/parabolic-refinement method, fits the robust
    cosine, and shows the map, fit, and residuals.
+   `FIT_METHOD = "fit"` keeps that behavior. If the cosine fit is unreliable,
+   use `"min"` or `"max"` to select the corresponding smoothed frequency bin
+   in every Z row and build a piecewise-linear lookup instead. Set
+   `SMOOTH_SIGMA_BINS = 0` if the extrema should come from the raw rows. A
+   sampled lookup needs only two complete Z rows and ignores the R^2/RMSE
+   gates, so `WRITE_ACCEPTED_FIT` is its only acceptance check.
 3. After checking the diagnostics and quality gates, set
    `WRITE_ACCEPTED_FIT = True` for one run. The accepted parameters, measured Z
    domain, quality, uncertainty, and source CSV are written atomically to
@@ -126,6 +132,17 @@ supervised L0 sessions before enabling L1. See
 The fit step does not create another experiment-data format. It reads Quick's
 native CSV and only updates the accepted calibration when explicitly enabled.
 Extrapolation outside the measured Z domain is rejected.
+
+## Qubit spectroscopy and DAC Nyquist zones
+
+One acquisition must stay wholly inside one physical DAC Nyquist zone. For this
+bitfile the inferred boundary is 4793 MHz: frequencies below it use zone 1 and
+frequencies above it use zone 2. `06b_qubit_spectroscopy_vs_flux.py` selects
+`p1_nqz` from `Q_FREQUENCY_MHZ` and rejects a range that crosses
+`Q_NYQUIST_BOUNDARY_MHZ` instead of silently measuring the mirror image. Split
+a broad search into a separate zone-1 run and zone-2 run; the chosen zone is
+recorded in the run title.
+
 ## Configuration and data
 
 Settings resolve in this order:

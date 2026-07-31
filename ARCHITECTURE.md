@@ -45,7 +45,9 @@ installed Quick 0.7.2. Library modules are not runnable entry points.
   fits rotated IQ, quality-gates the pi recommendation, and atomically versions
   accepted `q_length`/`q_gain` defaults.
 - `resonator_flux.py` reproduces the notebook notch extraction/cosine fit,
-  quality-gates acceptance, and atomically versions the lookup calibration.
+  quality-gates acceptance, and atomically versions the lookup calibration. It
+  also builds a sampled `min`/`max` piecewise-linear lookup for maps where the
+  cosine fit is unreliable; both models resolve through `flux_lookup.py`.
 - `presets.yml` owns reusable starting scans, averaging, retry, and analysis.
 - An adapter owns the Quick class, axis mapping, output columns, and analysis.
 - `runtime.py` owns exact retry, decode, analysis, and cleanup; it does not
@@ -80,7 +82,10 @@ cap, or wall-clock cap. `autocal_runs/STOP` is checked before every acquisition.
 
 Quick registers a sweep only when an iterable is passed as a constructor
 keyword. V3 passes each declared axis as a constructor sweep. `hard_avg`,
-`soft_avg`, and `rep` remain Mercator configuration overrides.
+`soft_avg`, `rep`, and `p0_nqz`-`p3_nqz` remain Mercator configuration
+overrides. The Nyquist keys let a launcher select the physical DAC image
+without editing the installed Quick package; a zone other than 1 or 2 is
+rejected before acquisition.
 
 `QuickBackend` forces `silent=False` when `qick.show_progress` is enabled, which
 activates Quick's native `quick.Sweep` progress display. It also returns the
@@ -110,6 +115,13 @@ extracts one resonator notch per Z row, and fits the accepted cosine lookup.
 Later fixed-Z launchers evaluate that lookup once; `06b` evaluates it for each
 outer Z row. The calibration record carries its source, quality, uncertainty,
 and measured domain, and out-of-domain use fails before hardware acquisition.
+
+`run_flux_sweep` also accepts a per-Z override callback. It resolves every
+row's overrides before the first acquisition, so the preview plan, the saved
+`row_overrides_by_z` metadata, and the acquisition loop cannot diverge. A
+callback may move the inner sweep itself; the combined plot then uses the full
+2D coordinate grid, and one combined native Quick CSV/YML pair is still
+written.
 
 Before the auxiliary held-Z program is compiled, every numeric array in its
 variables is reduced to a safe scalar (frequency center; minimum

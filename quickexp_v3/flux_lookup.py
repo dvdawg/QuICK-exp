@@ -9,8 +9,11 @@ import numpy as np
 
 from .errors import ConfigError
 from .resonator_flux import (
+    LOOKUP_MODEL_NAME,
+    MODEL_NAME,
     extract_notch_centers,
     frequency_from_calibration_record,
+    sampled_frequency,
 )
 
 
@@ -18,7 +21,30 @@ def _evaluate_cosine(record: Mapping[str, Any], z_gain: Any):
     return frequency_from_calibration_record(record, z_gain)
 
 
-EVALUATORS = {"cosine": _evaluate_cosine}
+def _evaluate_sampled_lookup(record: Mapping[str, Any], z_gain: Any):
+    """Interpolate any ``z_gain``/``*_freq_mhz`` sampled lookup record."""
+    value = record.get("value")
+    if not isinstance(value, Mapping):
+        raise ConfigError("sampled flux lookup record has no value mapping")
+    frequency_keys = sorted(
+        key for key in value if str(key).endswith("_freq_mhz")
+    )
+    if len(frequency_keys) != 1:
+        raise ConfigError(
+            "sampled flux lookup value must carry exactly one "
+            "'*_freq_mhz' array"
+        )
+    return sampled_frequency(
+        z_gain,
+        sampled_z_gain=value["z_gain"],
+        sampled_frequencies_mhz=value[frequency_keys[0]],
+    )
+
+
+EVALUATORS = {
+    MODEL_NAME: _evaluate_cosine,
+    LOOKUP_MODEL_NAME: _evaluate_sampled_lookup,
+}
 
 
 @dataclass(frozen=True)

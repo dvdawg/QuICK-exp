@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from quickexp_v3.backend import SyntheticBackend
 import quickexp_v3.ide as ide
@@ -130,3 +131,80 @@ def test_flux_saver_records_all_fitted_readouts_and_provenance(
         ("before", 2, 0.1),
         ("after", 2, 0.1, "completed"),
     ]
+
+
+def test_row_overrides_move_the_inner_sweep_per_z(tmp_path, monkeypatch):
+    backend = SyntheticBackend(seed=22)
+    backend.data_path = str(tmp_path)
+    flux = FakeFlux()
+
+    def sweep(config, sweep_config, progressBar):
+        return [
+            {"z_gain": float(value)}
+            for value in sweep_config["z_gain"]
+        ]
+
+    connection = SimpleNamespace(
+        backend=backend,
+        quick=SimpleNamespace(Saver=FakeSaver, Sweep=sweep),
+    )
+    monkeypatch.setattr(ide, "connect_quick", lambda repository: connection)
+    monkeypatch.setattr(
+        ide,
+        "make_held_flux_controller",
+        lambda *args, **kwargs: flux,
+    )
+
+    z_gain = np.array([-0.1, 0.0, 0.1])
+    rows = ide.run_flux_sweep(
+        ROOT,
+        experiment="qubit_spectroscopy",
+        preset="qubit_fine",
+        flux_values=z_gain,
+        readout_frequency=lambda z: 6884.0 + z,
+        row_overrides=lambda z: {
+            "q_freq": np.array([5500.0 + z, 5501.0 + z, 5502.0 + z]),
+            "p1_nqz": 1,
+        },
+        row_override_metadata={"model": "linear_interpolation"},
+        overrides={"hard_avg": 1, "soft_avg": 1},
+        live_hardware=True,
+        show_plot=False,
+    )
+
+    saver = FakeSaver.instance
+    assert saver.params["row_override_calibration"] == {
+        "model": "linear_interpolation"
+    }
+    assert saver.params["row_overrides_by_z"][1]["q_freq"] == [
+        5500.0,
+        5501.0,
+        5502.0,
+    ]
+    assert saver.params["row_overrides_by_z"][1]["p1_nqz"] == 1
+    # Each acquired row must use its own shifted inner axis.
+    assert [float(row.data.axes["q_freq"][0]) for row in rows] == [
+        5499.9,
+        5500.0,
+        5500.1,
+    ]
+
+
+def test_row_overrides_cannot_replace_the_swept_z_gain(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        ide,
+        "connect_quick",
+        lambda repository: pytest.fail("must fail before connecting"),
+    )
+
+    with pytest.raises(ValueError, match="cannot replace the swept z_gain"):
+        ide.run_flux_sweep(
+            ROOT,
+            experiment="qubit_spectroscopy",
+            preset="qubit_fine",
+            flux_values=np.array([-0.1, 0.0, 0.1]),
+            row_overrides=lambda z: {"z_gain": 0.5},
+            live_hardware=False,
+            show_plot=False,
+            backend=SyntheticBackend(seed=1),
+        )

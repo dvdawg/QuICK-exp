@@ -26,11 +26,16 @@ LIVE_HARDWARE = False
 # None selects the newest *ResVsZ_held_bias*.csv in the configured Quick folder.
 INPUT_CSV = None
 SCAN_NAME = DEFAULT_SCAN_NAME
+# "fit" = refined notch centers plus the cosine fit.
+# "min"/"max" = select that smoothed frequency bin per Z row and interpolate.
+# Use min/max when the cosine fit is unreliable; set SMOOTH_SIGMA_BINS = 0 to
+# take the extrema from the raw rows.
+FIT_METHOD = "fit"
 SMOOTH_SIGMA_BINS = 2.0
 PERIOD_MIN = None
 PERIOD_MAX = None
 
-# Quality gates used only when WRITE_ACCEPTED_FIT is True.
+# Acceptance gates for FIT_METHOD="fit"; min/max lookups ignore them.
 MINIMUM_R_SQUARED = 0.95
 MAXIMUM_RMSE_MHZ = 0.20
 
@@ -55,42 +60,61 @@ def main():
     source = _input_path()
     fit = fit_resonator_flux(
         source,
+        fit_method=FIT_METHOD,
         smooth_sigma_bins=SMOOTH_SIGMA_BINS,
         period_min=PERIOD_MIN,
         period_max=PERIOD_MAX,
     )
 
-    parameters = fit.parameters
-    statistics = fit.statistics
     preview_frequency = fit.frequency(PREVIEW_Z_GAIN)
     passes = fit.passes(
         minimum_r_squared=MINIMUM_R_SQUARED,
         maximum_rmse_mhz=MAXIMUM_RMSE_MHZ,
     )
-    print(f"Fit source: {fit.source_csv}")
+    print(f"Calibration source: {fit.source_csv}")
+    print(f"Calibration method: {fit.fit_method}")
+    if fit.fit_method == "fit":
+        parameters = fit.parameters
+        statistics = fit.statistics
+        print(
+            "Fit: r_freq(z) = "
+            f"{parameters['center_frequency']:.6f} + "
+            f"{parameters['amplitude']:.6f} * "
+            "cos(2*pi*(z - "
+            f"{parameters['peak_bias']:.6f})/"
+            f"{parameters['period']:.6f}) MHz"
+        )
+        print(
+            f"RMSE: {1000.0 * statistics['rmse_mhz']:.1f} kHz; "
+            f"R^2: {statistics['r_squared']:.6f}; "
+            f"fit domain: [{fit.z_gain.min():+.6f}, "
+            f"{fit.z_gain.max():+.6f}]"
+        )
+        print(
+            "Acceptance gates: "
+            f"{'PASS' if passes else 'FAIL'} "
+            f"(R^2 >= {MINIMUM_R_SQUARED}, "
+            f"RMSE <= {MAXIMUM_RMSE_MHZ} MHz)"
+        )
+    else:
+        print(
+            f"Lookup: selected the smoothed amplitude {fit.fit_method} "
+            f"in each of {len(fit.z_gain)} Z rows; linear interpolation "
+            "is used between rows."
+        )
+        print(
+            "Frequency-bin spacing: "
+            f"{fit.statistics['frequency_bin_mhz']:.6f} MHz; "
+            f"lookup domain: [{fit.z_gain.min():+.6f}, "
+            f"{fit.z_gain.max():+.6f}]"
+        )
+        print(
+            "R^2/RMSE gates do not apply to sampled min/max lookups; "
+            "WRITE_ACCEPTED_FIT remains the explicit acceptance latch."
+        )
     print(
-        "Fit: r_freq(z) = "
-        f"{parameters['center_frequency']:.6f} + "
-        f"{parameters['amplitude']:.6f} * "
-        "cos(2*pi*(z - "
-        f"{parameters['peak_bias']:.6f})/"
-        f"{parameters['period']:.6f}) MHz"
-    )
-    print(
-        f"RMSE: {1000.0 * statistics['rmse_mhz']:.1f} kHz; "
-        f"R^2: {statistics['r_squared']:.6f}; "
-        f"fit domain: [{fit.z_gain.min():+.6f}, "
-        f"{fit.z_gain.max():+.6f}]"
-    )
-    print(
-        f"Fitted readout at Z={PREVIEW_Z_GAIN:+.6f}: "
+        f"Calibrated readout at Z={PREVIEW_Z_GAIN:+.6f}: "
         f"{preview_frequency:.6f} MHz"
-    )
-    print(
-        "Acceptance gates: "
-        f"{'PASS' if passes else 'FAIL'} "
-        f"(R^2 >= {MINIMUM_R_SQUARED}, "
-        f"RMSE <= {MAXIMUM_RMSE_MHZ} MHz)"
     )
     if fit.dropped_z_gain.size:
         print(f"Dropped incomplete/non-finite Z rows: {fit.dropped_z_gain}")
@@ -103,11 +127,11 @@ def main():
             minimum_r_squared=MINIMUM_R_SQUARED,
             maximum_rmse_mhz=MAXIMUM_RMSE_MHZ,
         )
-        print(f"Accepted fit written atomically to {calibration_path}")
+        print(f"Accepted calibration written atomically to {calibration_path}")
     else:
         print(
             "WRITE_ACCEPTED_FIT=False: calibration.yml was not changed. "
-            "Inspect the diagnostics, then enable the latch to accept this fit."
+            "Inspect the diagnostics, then enable the latch to accept it."
         )
     if SHOW_PLOT:
         plt.show()

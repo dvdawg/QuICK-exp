@@ -47,6 +47,14 @@ Spectroscopy, T1, and Ramsey can analyze `amplitude`, `phase`, `I`, `Q`, or
 relaxation direction. Resonator spectroscopy defaults to the amplitude notch,
 matching the resonator-vs-flux extraction.
 
+`05d_fit_resonator_vs_flux.py` additionally accepts `FIT_METHOD`. `"fit"` is
+the refined-notch cosine fit gated on R^2 and RMSE. `"min"`/`"max"` select that
+smoothed amplitude bin in every Z row and store a piecewise-linear lookup
+instead; use them when the cosine fit is unreliable. The sampled lookup is
+exact at the measured rows, so the numerical gates do not apply and
+`WRITE_ACCEPTED_FIT` is the only acceptance step. Its resolution is the
+frequency-bin spacing, reported as the record's uncertainty.
+
 For a broad qubit spectroscopy scan with several candidate features, set
 `FIT_WINDOW_MHZ` around the one feature that should be calibrated:
 

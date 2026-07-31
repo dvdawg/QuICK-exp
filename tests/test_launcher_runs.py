@@ -397,6 +397,10 @@ def test_every_numbered_file_runs_to_completion_offline(tmp_path):
         module_globals = namespace["main"].__globals__
         module_globals["PROJECT_ROOT"] = tmp_path
         module_globals["LIVE_HARDWARE"] = False
+        if filename == "01_configure_experiment.py":
+            # The operator latch may legitimately be True in a live
+            # workspace; executing main() here must never write the YAML.
+            module_globals["WRITE_CHANGES"] = False
         if filename == "90_measurement_queue.py":
             module_globals["PROJECT_ROOT"] = ROOT
         if filename == "91_autocal.py":

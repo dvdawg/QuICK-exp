@@ -392,6 +392,8 @@ def run_flux_sweep(
     flux_line: str = "z_rf",
     readout_frequency: Optional[Callable[[float], float]] = None,
     readout_metadata: Optional[Mapping[str, Any]] = None,
+    row_overrides: Optional[Callable[[float], Mapping[str, Any]]] = None,
+    row_override_metadata: Optional[Mapping[str, Any]] = None,
     analyze_rows: bool = False,
     show_plot: bool = True,
     seed: int = 7,
@@ -419,6 +421,28 @@ def run_flux_sweep(
             )
     repository = load_repository(project_root)
     base_overrides = deepcopy(dict(overrides or {}))
+    # Resolve every row's override mapping up front so the preview, the
+    # saved metadata, and the acquisition loop all use identical settings.
+    resolved_row_overrides = []
+    for value in values:
+        extra = {} if row_overrides is None else row_overrides(float(value))
+        if not isinstance(extra, Mapping):
+            raise ValueError("row_overrides must return a mapping for every Z")
+        extra = deepcopy(dict(extra))
+        if "z_gain" in extra and not np.isclose(
+            float(extra["z_gain"]),
+            float(value),
+        ):
+            raise ValueError("row_overrides cannot replace the swept z_gain")
+        extra.pop("z_gain", None)
+        resolved = deepcopy(base_overrides)
+        resolved.update(extra)
+        resolved["z_gain"] = float(value)
+        resolved_row_overrides.append((extra, resolved))
+
+    if readout_values is not None:
+        for index, (_, resolved) in enumerate(resolved_row_overrides):
+            resolved["r_freq"] = float(readout_values[index])
     connection = None
     flux = None
     if live_hardware:
@@ -427,10 +451,7 @@ def run_flux_sweep(
         connection = connect_quick(repository)
         backend = connection.backend
         try:
-            initial_overrides = deepcopy(base_overrides)
-            initial_overrides["z_gain"] = float(values[0])
-            if readout_values is not None:
-                initial_overrides["r_freq"] = float(readout_values[0])
+            initial_overrides = deepcopy(resolved_row_overrides[0][1])
             initial_runner = ExperimentRunner(repository, backend)
             initial = initial_runner.plan(
                 experiment,
@@ -467,10 +488,7 @@ def run_flux_sweep(
     native_files = []
     original_data_path = getattr(backend, "data_path", None)
     if live_hardware and connection is not None and original_data_path:
-        preview_overrides = deepcopy(base_overrides)
-        preview_overrides["z_gain"] = float(values[0])
-        if readout_values is not None:
-            preview_overrides["r_freq"] = float(readout_values[0])
+        preview_overrides = deepcopy(resolved_row_overrides[0][1])
         preview = runner.plan(
             experiment,
             preset,
@@ -520,6 +538,18 @@ def run_flux_sweep(
             parameters["readout_frequency_calibration"] = to_builtin(
                 readout_metadata
             )
+        if row_overrides is not None:
+            parameters["row_overrides_by_z"] = [
+                {
+                    "z_gain": float(values[index]),
+                    **to_builtin(extra),
+                }
+                for index, (extra, _) in enumerate(resolved_row_overrides)
+            ]
+        if row_override_metadata is not None:
+            parameters["row_override_calibration"] = to_builtin(
+                row_override_metadata
+            )
         parameters[f"{inner_name}_sweep"] = to_builtin(
             preview.plan.variables[inner_name]
         )
@@ -559,12 +589,10 @@ def run_flux_sweep(
             value = float(value)
             if before_row is not None:
                 before_row(row_index, value)
-            row_overrides = deepcopy(base_overrides)
-            row_overrides["z_gain"] = value
+            row_run_overrides = deepcopy(resolved_row_overrides[row_index][1])
             row_readout = None
             if readout_values is not None:
                 row_readout = float(readout_values[row_index])
-                row_overrides["r_freq"] = row_readout
             if flux is not None:
                 flux.set(value)
             completed = None
@@ -572,7 +600,7 @@ def run_flux_sweep(
                 completed = runner.run(
                     experiment,
                     preset,
-                    overrides=row_overrides,
+                    overrides=row_run_overrides,
                     run_options=run_options,
                     title=combined_title,
                     analyze=analyze_rows,
@@ -622,7 +650,9 @@ def run_flux_sweep(
         inner_name = next(iter(completed_rows[0].data.axes))
         inner = np.asarray(completed_rows[0].data.axes[inner_name])
         matrix = []
+        inner_rows = []
         for row in completed_rows:
+            inner_rows.append(np.asarray(row.data.axes[inner_name], dtype=float))
             signals = row.data.signals
             matrix.append(
                 np.asarray(
@@ -631,9 +661,28 @@ def run_flux_sweep(
                 )
             )
         figure, plot = plt.subplots(figsize=(8, 5), constrained_layout=True)
+        # row_overrides may move the inner sweep per Z row, in which case
+        # pcolormesh needs the full 2D coordinate grid instead of one axis.
+        same_inner_axis = all(
+            candidate.shape == inner.shape
+            and np.allclose(candidate, inner, rtol=1e-10, atol=1e-12)
+            for candidate in inner_rows
+        )
+        if same_inner_axis:
+            plot_x = inner
+            plot_y = values
+        else:
+            lengths = {candidate.size for candidate in inner_rows}
+            if len(lengths) != 1:
+                raise ValueError(
+                    "row-dependent inner sweeps must use the same point count "
+                    "for the combined plot"
+                )
+            plot_x = np.vstack(inner_rows)
+            plot_y = np.broadcast_to(values[:, None], plot_x.shape)
         mesh = plot.pcolormesh(
-            inner,
-            values,
+            plot_x,
+            plot_y,
             np.asarray(matrix),
             shading="auto",
         )
