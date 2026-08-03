@@ -67,6 +67,7 @@ class NodeOutcome:
     proposals: Tuple[str, ...] = ()
     last_csv: Optional[str] = None
     gates: Mapping[str, Any] = None
+    classification: Optional[Mapping[str, Any]] = None
 
 
 @dataclass
@@ -106,6 +107,49 @@ def _gate(value: Any, threshold: str, passed: bool) -> dict:
         "value": value,
         "threshold": str(threshold),
         "passed": bool(passed),
+    }
+
+
+def classify_failure(candidates: Any, assessment: Any) -> dict:
+    """Classify failed evidence as instrument, identity, or estimation.
+
+    Coverage failures are class A and carry the next acquisition remediation.
+    Comparable real candidates are class B identity ambiguity. A sufficiently
+    covered measurement with one clear candidate is class C estimation error.
+    """
+    from .hp.remediation import next_remediation
+
+    real = sorted(
+        (item for item in candidates if not item.is_null),
+        key=lambda item: int(item.rank),
+    )
+    if not getattr(assessment, "sufficient", False):
+        step = next_remediation(
+            assessment,
+            attempted=(),
+            current_overrides={},
+        )
+        return {
+            "failure_class": "A",
+            "coverage_reasons": tuple(
+                getattr(assessment, "reasons", ())
+            ),
+            "candidate_count": len(real),
+            "proposed_remediation": (
+                step.step_id if step is not None else None
+            ),
+        }
+
+    ambiguous = bool(
+        len(real) >= 2
+        and abs(float(real[1].contrast))
+        >= 0.5 * abs(float(real[0].contrast))
+    )
+    return {
+        "failure_class": "B" if ambiguous else "C",
+        "coverage_reasons": (),
+        "candidate_count": len(real),
+        "proposed_remediation": None,
     }
 
 
@@ -1072,6 +1116,29 @@ def _n5(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
         kind="qubit",
         signal="amplitude",
     )
+    from .hp.candidates import extract_candidates
+    from .hp.coverage import assess_coverage
+
+    coarse_candidates = extract_candidates(coarse_fit)
+    coarse_assessment = assess_coverage(
+        candidates=coarse_candidates,
+        prior_window=(
+            float(coarse_center - coarse_span / 2.0),
+            float(coarse_center + coarse_span / 2.0),
+        ),
+        scan_window=(float(coarse[0]), float(coarse[-1])),
+        points=int(coarse.size),
+        expected_fwhm_mhz=float(
+            coarse_fit.parameters.get("fwhm_mhz", 1.0)
+        ),
+        expected_contrast=abs(
+            float(coarse_fit.parameters.get("amplitude", 0.0))
+        ),
+    )
+    coarse_classification = classify_failure(
+        coarse_candidates,
+        coarse_assessment,
+    )
     multi_feature = bool(coarse_fit.statistics.get("multi_feature"))
     shadow_recognized = not multi_feature
     if multi_feature:
@@ -1138,6 +1205,7 @@ def _n5(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
                 {},
                 last_csv=str(coarse_csv),
                 gates=gates,
+                classification=coarse_classification,
             )
     coarse_pass = coarse_fit.passes(
         minimum_r_squared=0.50,
@@ -1167,7 +1235,14 @@ def _n5(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
             passed=False,
             reason="coarse qubit feature did not pass",
         )
-        return NodeOutcome("retake", "coarse qubit feature failed", {}, last_csv=str(coarse_csv), gates=gates)
+        return NodeOutcome(
+            "retake",
+            "coarse qubit feature failed",
+            {},
+            last_csv=str(coarse_csv),
+            gates=gates,
+            classification=coarse_classification,
+        )
     ctx.session.set_working_values(
         {"session.n5_coarse_center_mhz": float(coarse_fit.center_mhz)}
     )
@@ -1264,7 +1339,14 @@ def _n5(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
         reason="coarse-to-fine qubit feature passed" if passed else "qubit fine-fit evidence failed",
     )
     if not passed:
-        return NodeOutcome("retake", "qubit spectroscopy evidence failed", {}, last_csv=str(fine_csv), gates=gates)
+        return NodeOutcome(
+            "retake",
+            "qubit spectroscopy evidence failed",
+            {},
+            last_csv=str(fine_csv),
+            gates=gates,
+            classification=coarse_classification,
+        )
     proposals, values = _propose(
         ctx,
         node_id=spec.node_id,
@@ -1272,7 +1354,15 @@ def _n5(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
         gates_pass=True,
         gate_table=gates,
     )
-    return NodeOutcome("done", "qubit frequency fitted coarse-to-fine", values, proposals, str(fine_csv), gates)
+    return NodeOutcome(
+        "done",
+        "qubit frequency fitted coarse-to-fine",
+        values,
+        proposals,
+        str(fine_csv),
+        gates,
+        coarse_classification,
+    )
 
 
 def _n8(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:

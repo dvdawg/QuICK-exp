@@ -689,7 +689,13 @@ class SyntheticBackend:
                     return value.ravel()
                 return np.full(points, float(value.ravel()[0]))
 
-            noise = 0.005 * (
+            noise_scale = (
+                abs(float(device.spectroscopy_noise_std))
+                if plan.quick_class
+                in {"ResonatorSpectroscopy", "QubitSpectroscopy", "TwoTone_ZPA"}
+                else 0.005
+            )
+            noise = noise_scale * (
                 rng.normal(size=points) + 1j * rng.normal(size=points)
             )
             if plan.quick_class == "ResonatorSpectroscopy":
@@ -703,7 +709,17 @@ class SyntheticBackend:
                     * (frequency - center)
                     / max(float(device.resonator_linewidth_mhz), 1e-9)
                 )
-                iq = 1.0 - 0.65 / (1.0 + 1j * detuning) + noise
+                iq = (
+                    1.0
+                    - 0.65 / (1.0 + 1j * detuning)
+                    + device.extra_spectral_response(
+                        "resonator",
+                        frequency,
+                        variable("z_gain", 0.0),
+                        10.0 ** (variable("r_power", -35.0) / 20.0),
+                    )
+                    + noise
+                )
                 truth["resonator_center_mhz"] = np.asarray(center).tolist()
             elif plan.quick_class in {"QubitSpectroscopy", "TwoTone_ZPA"}:
                 frequency = variable("q_freq")
@@ -717,7 +733,17 @@ class SyntheticBackend:
                     * (frequency - center)
                     / linewidth
                 )
-                iq = 0.1 + 0.75 / (1.0 + 1j * detuning) + noise
+                iq = (
+                    0.1
+                    + 0.75 / (1.0 + 1j * detuning)
+                    + device.extra_spectral_response(
+                        "qubit",
+                        frequency,
+                        variable("z_gain", 0.0),
+                        variable("q_gain", 0.0),
+                    )
+                    + noise
+                )
                 truth["qubit_center_mhz"] = np.asarray(center).tolist()
                 truth["qubit_linewidth_mhz"] = np.asarray(
                     linewidth

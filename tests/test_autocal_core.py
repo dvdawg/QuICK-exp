@@ -151,3 +151,66 @@ def test_gp_finds_correlated_optimum_and_beats_sequential_1d_baseline():
             values.append(fidelity(point))
         sequential[dimension] = candidates[int(np.argmax(values))]
     assert result.y > fidelity(sequential)
+
+
+def test_node_outcome_carries_a_failure_classification_field():
+    from quickexp_v3.autocal.nodes import NodeOutcome
+
+    outcome = NodeOutcome("retake", "gate failed", {})
+    assert outcome.classification is None
+
+    classified = NodeOutcome(
+        "retake",
+        "gate failed",
+        {},
+        classification={
+            "failure_class": "A",
+            "coverage_reasons": ("detectability",),
+            "candidate_count": 2,
+            "proposed_remediation": "averaging",
+        },
+    )
+    assert classified.classification["failure_class"] == "A"
+
+
+def test_multiple_candidates_classify_as_identity_ambiguity():
+    from pathlib import Path
+
+    from quickexp_v3.autocal.hp.candidates import Candidate
+    from quickexp_v3.autocal.hp.coverage import CoverageAssessment
+    from quickexp_v3.autocal.nodes import classify_failure
+
+    def _candidate(center, contrast, rank):
+        return Candidate(
+            candidate_id="c{0}".format(rank),
+            center_mhz=center,
+            fwhm_mhz=1.0,
+            contrast=contrast,
+            center_uncertainty_mhz=0.05,
+            local_snr=contrast / 0.01,
+            rank=rank,
+            source_csv=Path("t.csv"),
+            window_mhz=(5500.0, 5700.0),
+            statistics={"rmse": 0.01},
+        )
+
+    sufficient = CoverageAssessment(True, (), 1.0, 20.0, 0.03, 10.0)
+    candidates = (_candidate(5600.0, 0.5, 0), _candidate(5560.0, 0.45, 1))
+    assert classify_failure(candidates, sufficient)["failure_class"] == "B"
+
+
+def test_insufficient_coverage_classifies_as_instrument_limited():
+    from quickexp_v3.autocal.hp.coverage import CoverageAssessment
+    from quickexp_v3.autocal.nodes import classify_failure
+
+    insufficient = CoverageAssessment(
+        False,
+        ("detectability",),
+        1.0,
+        20.0,
+        0.03,
+        10.0,
+    )
+    result = classify_failure((), insufficient)
+    assert result["failure_class"] == "A"
+    assert result["proposed_remediation"] == "averaging"

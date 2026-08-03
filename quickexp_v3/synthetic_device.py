@@ -15,6 +15,49 @@ from .errors import AcquisitionError
 from .util import to_builtin, utc_now
 
 
+@dataclass(frozen=True)
+class SpuriousFeature:
+    """One injected non-target feature used by the adversarial device zoo.
+
+    ``amplitude`` is the complex-response strength at ``reference_gain``.
+    A missing flux period makes the feature flux independent, as expected for
+    a TLS or package mode.
+    """
+
+    kind: str
+    center_mhz: float
+    fwhm_mhz: float
+    amplitude: float
+    power_exponent: float = 1.0
+    reference_gain: float = 0.1
+    saturation_gain: float = 1.0e9
+    flux_period_z: Optional[float] = None
+    flux_amplitude_mhz: float = 0.0
+    flux_offset_z: float = 0.0
+    label: str = "spurious"
+
+    def center_at_flux(self, z_gain: Any) -> np.ndarray:
+        """Return the feature centre at each requested held-flux value."""
+        z = np.asarray(z_gain, dtype=float)
+        if self.flux_period_z is None or float(self.flux_period_z) == 0.0:
+            return np.full_like(z, float(self.center_mhz), dtype=float)
+        return float(self.center_mhz) + float(self.flux_amplitude_mhz) * np.cos(
+            2.0
+            * np.pi
+            * (z - float(self.flux_offset_z))
+            / float(self.flux_period_z)
+        )
+
+    def strength(self, drive_gain: Any) -> np.ndarray:
+        """Return strength normalized to ``amplitude`` at ``reference_gain``."""
+        reference = max(abs(float(self.reference_gain)), np.finfo(float).eps)
+        normalized_gain = np.abs(np.asarray(drive_gain, dtype=float)) / reference
+        normalized_saturation = abs(float(self.saturation_gain)) / reference
+        response_scale = normalized_gain ** float(self.power_exponent)
+        saturation_scale = normalized_saturation ** float(self.power_exponent)
+        return float(self.amplitude) * np.minimum(response_scale, saturation_scale)
+
+
 @dataclass
 class DeviceModel:
     """Ground truth shared by every acquisition made by a SyntheticBackend."""
@@ -52,6 +95,8 @@ class DeviceModel:
     qubit_drift_mhz_per_hour: float = 0.0
     coherence_fraction_per_hour: float = 0.0
     elapsed_hours: float = 0.0
+    spectroscopy_noise_std: float = 0.005
+    spurious_features: tuple = ()
     failure_hook: Optional[Callable[[str, int], bool]] = None
     _failures: dict = field(default_factory=dict, init=False, repr=False)
     _failure_checks: int = field(default=0, init=False, repr=False)
@@ -111,6 +156,37 @@ class DeviceModel:
             + abs(float(self.qubit_power_broadening_mhz_per_gain))
             * np.abs(np.asarray(q_gain, dtype=float))
         )
+
+    def extra_spectral_response(
+        self,
+        kind: str,
+        frequency: Any,
+        z_gain: Any,
+        drive_gain: Any,
+    ) -> np.ndarray:
+        """Return the additive complex response of injected spectral features.
+
+        All quantities broadcast to the frequency grid, which keeps injected
+        features coherent in both one-dimensional traces and flattened maps.
+        Features registered for another spectroscopy kind are no-ops.
+        """
+        x = np.asarray(frequency, dtype=float)
+        total = np.zeros(x.shape, dtype=complex)
+        for feature in self.spurious_features:
+            if str(feature.kind) != str(kind):
+                continue
+            center = np.broadcast_to(
+                np.asarray(feature.center_at_flux(z_gain), dtype=float),
+                x.shape,
+            )
+            strength = np.broadcast_to(
+                np.asarray(feature.strength(drive_gain), dtype=float),
+                x.shape,
+            )
+            width = max(abs(float(feature.fwhm_mhz)), 1.0e-9)
+            detuning = 2.0 * (x - center) / width
+            total = total + strength / (1.0 + 1j * detuning)
+        return total
 
     def coherence_time(self, kind: str) -> float:
         base = {

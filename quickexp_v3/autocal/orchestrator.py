@@ -489,6 +489,7 @@ def run_autocal(
                     last_csv=outcome.last_csv,
                     last_values=outcome.values,
                     reason=outcome.reason,
+                    classification=outcome.classification,
                 )
                 if attempt < policy.max_node_attempts:
                     session.event(
@@ -498,6 +499,7 @@ def run_autocal(
                         reason=outcome.reason,
                         attempt=attempt,
                         gates=to_builtin(outcome.gates or {}),
+                        classification=to_builtin(outcome.classification),
                     )
                     node_state = session.node(spec.node_id)
                     continue
@@ -508,6 +510,7 @@ def run_autocal(
                     outcome.proposals,
                     outcome.last_csv,
                     outcome.gates,
+                    outcome.classification,
                 )
 
             final_status = "done" if outcome.status in {"done", "skipped"} else "blocked"
@@ -518,6 +521,7 @@ def run_autocal(
                 last_values=outcome.values,
                 reason=outcome.reason,
                 proposals=list(outcome.proposals),
+                classification=outcome.classification,
             )
             if final_status == "blocked":
                 session.event(
@@ -526,6 +530,7 @@ def run_autocal(
                     decision="blocked",
                     reason=outcome.reason,
                     gates=to_builtin(outcome.gates or {}),
+                    classification=to_builtin(outcome.classification),
                 )
             else:
                 session.event(
@@ -534,6 +539,7 @@ def run_autocal(
                     decision="done",
                     reason=outcome.reason,
                     proposals=list(outcome.proposals),
+                    classification=to_builtin(outcome.classification),
                 )
             break
 

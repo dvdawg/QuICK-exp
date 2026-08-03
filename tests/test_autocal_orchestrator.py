@@ -328,10 +328,13 @@ def test_shifted_qubit_outside_expected_window_uses_widening_ladder(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    assert any(
-        event["event"] == "retake" and event.get("node") == "N5"
+    n5_retakes = [
+        event
         for event in events
-    )
+        if event["event"] == "retake" and event.get("node") == "N5"
+    ]
+    assert n5_retakes
+    assert all("classification" in event for event in n5_retakes)
 
 
 def test_low_snr_retake_doubles_node_averaging(
