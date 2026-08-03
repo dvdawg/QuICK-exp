@@ -77,6 +77,9 @@ class DeviceModel:
     ec_mhz: float = 180.0
     qubit_linewidth_mhz: float = 0.7
     qubit_power_broadening_mhz_per_gain: float = 0.0
+    qubit_spectroscopy_reference_gain: float = 0.3
+    qubit_spectroscopy_saturation_gain: float = 0.3
+    qubit_spectroscopy_power_exponent: float = 1.0
     rabi_rate_per_gain_mhz: float = 3.0
     t1_us: float = 6.2
     t1_flux_modulation_fraction: float = 0.20
@@ -156,6 +159,19 @@ class DeviceModel:
             + abs(float(self.qubit_power_broadening_mhz_per_gain))
             * np.abs(np.asarray(q_gain, dtype=float))
         )
+
+    def qubit_spectroscopy_strength(self, q_gain: Any) -> np.ndarray:
+        """Return the wanted transition contrast with low-power scaling."""
+        reference = max(
+            abs(float(self.qubit_spectroscopy_reference_gain)),
+            np.finfo(float).eps,
+        )
+        normalized = np.abs(np.asarray(q_gain, dtype=float)) / reference
+        saturation = (
+            abs(float(self.qubit_spectroscopy_saturation_gain)) / reference
+        )
+        exponent = float(self.qubit_spectroscopy_power_exponent)
+        return 0.75 * np.minimum(normalized ** exponent, saturation ** exponent)
 
     def extra_spectral_response(
         self,

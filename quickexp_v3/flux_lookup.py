@@ -11,7 +11,7 @@ from .errors import ConfigError
 from .resonator_flux import (
     LOOKUP_MODEL_NAME,
     MODEL_NAME,
-    extract_notch_centers,
+    extract_feature_centers,
     frequency_from_calibration_record,
     sampled_frequency,
 )
@@ -56,10 +56,12 @@ class NotchCentersQC:
     edge_pinned: np.ndarray
     low_depth: np.ndarray
     discontinuity_rows: np.ndarray
+    feature_polarity: str = "unknown"
 
     @property
     def quality(self) -> dict:
         return {
+            "feature_polarity": self.feature_polarity,
             "edge_pinned_rows": np.flatnonzero(self.edge_pinned).tolist(),
             "low_depth_rows": np.flatnonzero(self.low_depth).tolist(),
             "discontinuity_rows": self.discontinuity_rows.tolist(),
@@ -80,18 +82,23 @@ def extract_notch_centers_qc(
     frequencies_mhz: Any,
     amplitude: Any,
     smooth_sigma_bins: float = 2.0,
+    feature_polarity: str = "auto",
 ) -> NotchCentersQC:
-    """Wrap the established notch extractor with row and branch QC."""
+    """Extract an automatically polarized resonance ridge with row QC."""
     frequency = np.asarray(frequencies_mhz, dtype=float)
     values = np.asarray(amplitude, dtype=float)
-    centers, depths, smoothed = extract_notch_centers(
+    centers, depths, smoothed, selected_polarity = extract_feature_centers(
         frequency,
         values,
         smooth_sigma_bins,
+        feature_polarity=feature_polarity,
     )
-    minimum_indices = np.argmin(smoothed, axis=1)
-    edge_pinned = (minimum_indices == 0) | (
-        minimum_indices == frequency.size - 1
+    selected_indices = np.argmin(
+        np.abs(frequency[None, :] - centers[:, None]),
+        axis=1,
+    )
+    edge_pinned = (selected_indices == 0) | (
+        selected_indices == frequency.size - 1
     )
     row_noise = np.median(
         np.abs(np.diff(values, axis=1) - np.median(np.diff(values, axis=1), axis=1)[:, None]),
@@ -112,6 +119,7 @@ def extract_notch_centers_qc(
         centers_mhz=centers,
         depths=depths,
         smoothed=smoothed,
+        feature_polarity=selected_polarity,
         included=included,
         edge_pinned=edge_pinned,
         low_depth=low_depth,

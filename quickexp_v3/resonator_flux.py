@@ -20,6 +20,7 @@ DEFAULT_SCAN_NAME = "ResVsZ_held_bias"
 MODEL_NAME = "cosine"
 LOOKUP_MODEL_NAME = "linear_interpolation"
 FIT_METHODS = ("fit", "min", "max")
+FEATURE_POLARITIES = ("auto", "dip", "peak")
 # The four-parameter cosine needs a well-conditioned Z axis; a sampled
 # min/max lookup only needs two rows to interpolate between.
 MINIMUM_COSINE_Z_ROWS = 6
@@ -183,39 +184,73 @@ def load_scan(
     data = data[finite_axes]
     if len(data) == 0:
         raise AnalysisError("resonator flux scan has no finite axis rows")
-    z_all = np.unique(data[:, 0])
-    frequencies = np.unique(data[:, 1])
-    if len(frequencies) < 3:
-        raise AnalysisError("at least three readout frequencies are required")
-
-    amplitude = np.full((len(z_all), len(frequencies)), np.nan)
-    counts = np.zeros_like(amplitude, dtype=int)
-    z_index = np.searchsorted(z_all, data[:, 0])
-    f_index = np.searchsorted(frequencies, data[:, 1])
-    np.add.at(counts, (z_index, f_index), 1)
-    if np.any(counts > 1):
+    if np.unique(data[:, :2], axis=0).shape[0] != data.shape[0]:
         raise AnalysisError("resonator flux scan contains duplicate grid points")
-    amplitude[z_index, f_index] = data[:, 2]
-
-    valid_rows = np.all((counts == 1) & np.isfinite(amplitude), axis=1)
-    dropped_z = z_all[~valid_rows]
-    z_values = z_all[valid_rows]
-    amplitude = amplitude[valid_rows]
+    z_all = np.unique(data[:, 0])
+    row_frequencies = []
+    row_amplitudes = []
+    z_values = []
+    dropped = []
+    expected_points = None
+    expected_step = None
+    for z_gain in z_all:
+        row = data[data[:, 0] == z_gain]
+        row = row[np.argsort(row[:, 1])]
+        frequency = np.asarray(row[:, 1], dtype=float)
+        amplitude_row = np.asarray(row[:, 2], dtype=float)
+        valid = bool(
+            frequency.size >= 3
+            and np.all(np.isfinite(amplitude_row))
+            and np.unique(frequency).size == frequency.size
+        )
+        if valid:
+            steps = np.diff(frequency)
+            step = float(np.median(steps))
+            valid = bool(
+                step > 0.0
+                and np.allclose(
+                    steps,
+                    step,
+                    rtol=1.0e-5,
+                    atol=max(abs(step) * 1.0e-8, 1.0e-12),
+                )
+            )
+        if expected_points is None and valid:
+            expected_points = int(frequency.size)
+            expected_step = step
+        if valid:
+            valid = bool(
+                int(frequency.size) == expected_points
+                and np.isclose(
+                    step,
+                    expected_step,
+                    rtol=1.0e-5,
+                    atol=max(abs(expected_step) * 1.0e-8, 1.0e-12),
+                )
+            )
+        if not valid:
+            dropped.append(float(z_gain))
+            continue
+        z_values.append(float(z_gain))
+        row_frequencies.append(frequency)
+        row_amplitudes.append(amplitude_row)
+    dropped_z = np.asarray(dropped, dtype=float)
+    z_values = np.asarray(z_values, dtype=float)
     if len(z_values) < minimum_z_rows:
         raise AnalysisError(
             f"at least {minimum_z_rows} complete finite Z rows are required "
             "for this calibration"
         )
-
-    frequency_steps = np.diff(frequencies)
-    frequency_step = float(np.median(frequency_steps))
-    if frequency_step <= 0 or not np.allclose(
-        frequency_steps,
-        frequency_step,
-        rtol=1e-5,
-        atol=max(abs(frequency_step) * 1e-8, 1e-12),
-    ):
-        raise AnalysisError("readout frequency axis must be uniformly spaced")
+    frequency_grid = np.vstack(row_frequencies)
+    amplitude = np.vstack(row_amplitudes)
+    frequencies = (
+        frequency_grid[0]
+        if all(
+            np.allclose(row, frequency_grid[0], rtol=1.0e-10, atol=1.0e-12)
+            for row in frequency_grid[1:]
+        )
+        else frequency_grid
+    )
     return z_values, frequencies, amplitude, dropped_z
 
 
@@ -237,39 +272,104 @@ def _smooth_amplitude(
     )
 
 
+def extract_feature_centers(
+    frequencies_mhz: np.ndarray,
+    amplitude_db: np.ndarray,
+    smooth_sigma_bins: float,
+    feature_polarity: str = "auto",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
+    """Extract consistently polarized peaks or dips from spectroscopy rows."""
+    polarity = str(feature_polarity).strip().lower()
+    if polarity not in FEATURE_POLARITIES:
+        choices = ", ".join(repr(choice) for choice in FEATURE_POLARITIES)
+        raise AnalysisError(f"feature_polarity must be one of {choices}")
+    smoothed = _smooth_amplitude(amplitude_db, smooth_sigma_bins)
+    frequency_rows = (
+        np.broadcast_to(frequencies_mhz, amplitude_db.shape)
+        if np.asarray(frequencies_mhz).ndim == 1
+        else np.asarray(frequencies_mhz, dtype=float)
+    )
+    if smoothed.ndim != 2 or smoothed.shape != frequency_rows.shape:
+        raise AnalysisError(
+            "spectroscopy amplitude must have one row per outer-axis value "
+            "and one column per frequency"
+        )
+    point_count = frequency_rows.shape[1]
+    edge_count = max(2, min(20, point_count // 5))
+    edge_indices = np.r_[:edge_count, point_count - edge_count : point_count]
+    # Remove a per-row linear background so dip and peak contrast are
+    # measured against the same reference instead of the row median.
+    deviation = np.empty_like(smoothed)
+    for row_index, row in enumerate(smoothed):
+        row_frequency = frequency_rows[row_index]
+        reference = float(np.mean(row_frequency))
+        slope, offset = np.polyfit(
+            row_frequency[edge_indices] - reference,
+            row[edge_indices],
+            1,
+        )
+        deviation[row_index] = row - (
+            offset + slope * (row_frequency - reference)
+        )
+    peak_contrast = np.max(deviation, axis=1)
+    dip_contrast = -np.min(deviation, axis=1)
+    if polarity == "auto":
+        polarity = (
+            "peak"
+            if float(np.median(peak_contrast))
+            > float(np.median(dip_contrast))
+            else "dip"
+        )
+    indices = (
+        np.argmax(deviation, axis=1)
+        if polarity == "peak"
+        else np.argmin(deviation, axis=1)
+    )
+    centers = np.empty(amplitude_db.shape[0], dtype=float)
+    contrasts = np.empty_like(centers)
+
+    for row_index, feature_index in enumerate(indices):
+        row_frequency = frequency_rows[row_index]
+        center = float(row_frequency[feature_index])
+        if 0 < feature_index < len(row_frequency) - 1:
+            local_frequency = row_frequency[
+                feature_index - 1 : feature_index + 2
+            ]
+            local_signal = deviation[
+                row_index,
+                feature_index - 1 : feature_index + 2,
+            ]
+            offsets = local_frequency - center
+            quadratic, linear, _ = np.polyfit(offsets, local_signal, deg=2)
+            curvature_matches = (
+                quadratic < 0 if polarity == "peak" else quadratic > 0
+            )
+            if curvature_matches:
+                correction = -linear / (2.0 * quadratic)
+                limit = float(np.max(np.abs(offsets)))
+                center += float(np.clip(correction, -limit, limit))
+        centers[row_index] = center
+        contrasts[row_index] = (
+            float(deviation[row_index, feature_index])
+            if polarity == "peak"
+            else -float(deviation[row_index, feature_index])
+        )
+    return centers, contrasts, smoothed, polarity
+
+
 def extract_notch_centers(
     frequencies_mhz: np.ndarray,
     amplitude_db: np.ndarray,
     smooth_sigma_bins: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Extract each notch with smoothing and three-bin parabolic refinement."""
-    smoothed = _smooth_amplitude(amplitude_db, smooth_sigma_bins)
-    minimum_indices = np.argmin(smoothed, axis=1)
-    centers = np.empty(amplitude_db.shape[0], dtype=float)
-    depths = np.empty_like(centers)
-
-    for row_index, minimum_index in enumerate(minimum_indices):
-        center = float(frequencies_mhz[minimum_index])
-        if 0 < minimum_index < len(frequencies_mhz) - 1:
-            local_frequency = frequencies_mhz[
-                minimum_index - 1 : minimum_index + 2
-            ]
-            local_signal = smoothed[
-                row_index,
-                minimum_index - 1 : minimum_index + 2,
-            ]
-            offsets = local_frequency - center
-            quadratic, linear, _ = np.polyfit(offsets, local_signal, deg=2)
-            if quadratic > 0:
-                correction = -linear / (2.0 * quadratic)
-                limit = float(np.max(np.abs(offsets)))
-                center += float(np.clip(correction, -limit, limit))
-        centers[row_index] = center
-        depths[row_index] = (
-            float(np.median(amplitude_db[row_index]))
-            - float(smoothed[row_index, minimum_index])
-        )
-    return centers, depths, smoothed
+    """Backward-compatible explicitly downward-notch extractor."""
+    centers, contrasts, smoothed, _ = extract_feature_centers(
+        frequencies_mhz,
+        amplitude_db,
+        smooth_sigma_bins,
+        feature_polarity="dip",
+    )
+    return centers, contrasts, smoothed
 
 
 def extract_extremum_frequencies(
@@ -295,7 +395,13 @@ def extract_extremum_frequencies(
         if method == "min"
         else selected - baseline
     )
-    return frequencies_mhz[indices].astype(float), contrast, smoothed
+    frequency_rows = (
+        np.broadcast_to(frequencies_mhz, amplitude_db.shape)
+        if np.asarray(frequencies_mhz).ndim == 1
+        else np.asarray(frequencies_mhz, dtype=float)
+    )
+    selected_frequency = frequency_rows[row_indices, indices]
+    return selected_frequency.astype(float), contrast, smoothed
 
 
 def _cosine_array(z_gain: np.ndarray, parameters: np.ndarray) -> np.ndarray:
@@ -464,6 +570,7 @@ class ResonatorFluxFit:
     statistics: Mapping[str, float]
     smooth_sigma_bins: float
     dropped_z_gain: np.ndarray
+    feature_polarity: str = "unknown"
 
     @property
     def notch_depth_db(self) -> np.ndarray:
@@ -526,6 +633,7 @@ def fit_resonator_flux(
     *,
     fit_method: str = "fit",
     smooth_sigma_bins: float = 2.0,
+    feature_polarity: str = "auto",
     period_min: Optional[float] = None,
     period_max: Optional[float] = None,
 ) -> ResonatorFluxFit:
@@ -543,12 +651,13 @@ def fit_resonator_flux(
             else MINIMUM_LOOKUP_Z_ROWS
         ),
     )
-    frequency_step = float(np.median(np.diff(frequencies)))
+    frequency_step = float(np.median(np.diff(frequencies, axis=-1)))
     if method == "fit":
-        centers, contrast, smoothed = extract_notch_centers(
+        centers, contrast, smoothed, selected_polarity = extract_feature_centers(
             frequencies,
             amplitude,
             smooth_sigma_bins,
+            feature_polarity=feature_polarity,
         )
         parameters_array, fitted, statistics = fit_cosine(
             z_gain,
@@ -574,10 +683,12 @@ def fit_resonator_flux(
         fitted = centers.copy()
         parameters = {}
         statistics = {"frequency_bin_mhz": abs(frequency_step)}
+        selected_polarity = "dip" if method == "min" else "peak"
         model = LOOKUP_MODEL_NAME
     return ResonatorFluxFit(
         source_csv=source,
         fit_method=method,
+        feature_polarity=selected_polarity,
         model=model,
         z_gain=z_gain,
         frequencies_mhz=frequencies,
@@ -607,9 +718,14 @@ def plot_resonator_flux_fit(fit: ResonatorFluxFit):
         figsize=(16, 4.2),
         constrained_layout=True,
     )
+    plot_y = (
+        np.broadcast_to(fit.z_gain[:, None], fit.frequencies_mhz.shape)
+        if np.asarray(fit.frequencies_mhz).ndim == 2
+        else fit.z_gain
+    )
     mesh = axes[0].pcolormesh(
         fit.frequencies_mhz,
-        fit.z_gain,
+        plot_y,
         fit.amplitude_db,
         shading="auto",
         cmap="turbo",
@@ -639,7 +755,7 @@ def plot_resonator_flux_fit(fit: ResonatorFluxFit):
         markeredgewidth=0.7,
         markersize=4,
         label=(
-            "refined notch"
+            f"refined {fit.feature_polarity}"
             if fit.fit_method == "fit"
             else f"selected {fit.fit_method} bin"
         ),
@@ -702,6 +818,7 @@ def calibration_record(fit: ResonatorFluxFit) -> dict:
     quality = {
         "complete_z_rows": int(len(fit.z_gain)),
         "dropped_z_rows": to_builtin(fit.dropped_z_gain),
+        "feature_polarity": fit.feature_polarity,
     }
     if fit.model == MODEL_NAME:
         value = {"parameters": dict(fit.parameters)}
@@ -713,6 +830,11 @@ def calibration_record(fit: ResonatorFluxFit) -> dict:
         quality.update(
             {
                 "r_squared": float(fit.statistics["r_squared"]),
+                "feature_contrast_db": {
+                    "minimum": float(np.min(fit.feature_contrast_db)),
+                    "median": float(np.median(fit.feature_contrast_db)),
+                },
+                # Backward-compatible alias retained for older reports.
                 "notch_depth_db": {
                     "minimum": float(np.min(fit.feature_contrast_db)),
                     "median": float(np.median(fit.feature_contrast_db)),
@@ -720,8 +842,9 @@ def calibration_record(fit: ResonatorFluxFit) -> dict:
             }
         )
         notes = (
-            "Per-Z notch minima use Gaussian smoothing and three-bin "
-            "parabolic center refinement before the cosine fit."
+            f"Per-Z {fit.feature_polarity} features use Gaussian smoothing, "
+            "linear-background removal, and three-bin parabolic center "
+            "refinement before the cosine fit."
         )
     elif fit.model == LOOKUP_MODEL_NAME:
         value = {

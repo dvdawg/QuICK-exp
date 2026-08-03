@@ -25,7 +25,12 @@ from quickexp_v3.resonator_flux import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def write_synthetic_scan(path: Path, *, incomplete_index=None) -> dict:
+def write_synthetic_scan(
+    path: Path,
+    *,
+    incomplete_index=None,
+    polarity: float = -1.0,
+) -> dict:
     parameters = {
         "center_frequency": 6884.2,
         "amplitude": 0.7,
@@ -46,7 +51,7 @@ def write_synthetic_scan(path: Path, *, incomplete_index=None) -> dict:
                 / parameters["period"]
             )
         )
-        amplitude = -12.0 * np.exp(
+        amplitude = polarity * 12.0 * np.exp(
             -0.5 * ((frequencies - center) / 0.08) ** 2
         )
         row_frequencies = frequencies
@@ -73,9 +78,17 @@ def write_synthetic_scan(path: Path, *, incomplete_index=None) -> dict:
     return parameters
 
 
-def test_notebook_style_fit_recovers_frequency_curve(tmp_path):
-    source = tmp_path / "00025 - ResVsZ_held_bias.csv"
-    expected = write_synthetic_scan(source)
+@pytest.mark.parametrize(
+    ("polarity", "expected_polarity"),
+    [(-1.0, "dip"), (1.0, "peak")],
+)
+def test_notebook_style_fit_recovers_frequency_curve(
+    tmp_path,
+    polarity,
+    expected_polarity,
+):
+    source = tmp_path / f"00025 - ResVsZ_held_bias_{expected_polarity}.csv"
+    expected = write_synthetic_scan(source, polarity=polarity)
 
     fit = fit_resonator_flux(source, smooth_sigma_bins=1.0)
 
@@ -93,6 +106,7 @@ def test_notebook_style_fit_recovers_frequency_curve(tmp_path):
     assert np.max(np.abs(fit.frequency(probe) - expected_frequency)) < 0.03
     assert fit.statistics["r_squared"] > 0.99
     assert fit.statistics["rmse_mhz"] < 0.02
+    assert fit.feature_polarity == expected_polarity
     assert fit.passes(minimum_r_squared=0.95, maximum_rmse_mhz=0.2)
 
     figure = plot_resonator_flux_fit(fit)

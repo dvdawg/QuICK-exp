@@ -36,6 +36,26 @@ class AutocalPolicy:
     r_power_max_db: float
     require_ramsey_confirmation: bool
     auto_promotion_configured: bool
+    hypothesis_nodes: frozenset
+    adaptive_nodes: frozenset
+    margin_threshold: float
+    probe_budget_seconds: float
+    top_k_candidates: int
+    candidate_prominence_ratio: float
+    max_backtracks_per_session: int
+    max_backtracks_per_address: int
+    adaptive_initial_rows: int
+    adaptive_max_rows: int
+    adaptive_abort_after_rows: int
+    advisor_mode: str
+    advisor_model: str
+    advisor_timeout_seconds: float
+
+    def hypothesis_enabled(self, node_id: str) -> bool:
+        return str(node_id) in self.hypothesis_nodes
+
+    def adaptive_enabled(self, node_id: str) -> bool:
+        return str(node_id) in self.adaptive_nodes
 
     def clamp_overrides(self, overrides: Mapping[str, Any]) -> dict:
         result = dict(overrides)
@@ -174,6 +194,10 @@ def load_autocal_policy(hardware: Mapping[str, Any]) -> AutocalPolicy:
     budgets = raw.get("budgets", {})
     caps = raw.get("caps", {})
     ramsey = raw.get("ramsey_sign", {})
+    hypothesis = raw.get("hypothesis", {})
+    backtracking = raw.get("backtracking", {})
+    adaptive = raw.get("adaptive", {})
+    advisor = raw.get("advisor", {})
     return AutocalPolicy(
         hard_stop_records=(
             _MANDATORY_HARD_STOP_RECORDS
@@ -189,4 +213,28 @@ def load_autocal_policy(hardware: Mapping[str, Any]) -> AutocalPolicy:
             ramsey.get("require_two_point_confirmation", True)
         ),
         auto_promotion_configured=bool(configured),
+        hypothesis_nodes=frozenset(raw.get("hypothesis_nodes", ())),
+        adaptive_nodes=frozenset(raw.get("adaptive_nodes", ())),
+        margin_threshold=float(hypothesis.get("margin_threshold", 2.0)),
+        probe_budget_seconds=float(
+            hypothesis.get("probe_budget_seconds", 600.0)
+        ),
+        top_k_candidates=int(hypothesis.get("top_k_candidates", 3)),
+        candidate_prominence_ratio=float(
+            hypothesis.get("candidate_prominence_ratio", 0.5)
+        ),
+        max_backtracks_per_session=int(
+            backtracking.get("max_backtracks_per_session", 3)
+        ),
+        max_backtracks_per_address=int(
+            backtracking.get("max_backtracks_per_address", 2)
+        ),
+        adaptive_initial_rows=int(adaptive.get("initial_rows", 5)),
+        adaptive_max_rows=int(adaptive.get("max_rows", 7)),
+        adaptive_abort_after_rows=int(
+            adaptive.get("abort_after_rows", 5)
+        ),
+        advisor_mode=str(advisor.get("mode", "null")),
+        advisor_model=str(advisor.get("model", "claude-sonnet-5")),
+        advisor_timeout_seconds=float(advisor.get("timeout_seconds", 60.0)),
     )

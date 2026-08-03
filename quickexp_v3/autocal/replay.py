@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import json
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -23,6 +24,12 @@ from ..resonator_flux import (
     frequency_from_calibration_record,
 )
 from .session import AutocalSession
+from .hp.candidates import Candidate, extract_candidates
+from .hp.advisor import AdvisoryResponse
+from .hp.coverage import CoverageAssessment, assess_coverage
+from .hp.probes import get_probe
+from .hp.scorecard import adjudicate, build_scorecard
+from .hp.engine import consistency_passes
 
 
 @dataclass(frozen=True)
@@ -131,7 +138,10 @@ def _evaluate_n1(paths: Sequence[Path]) -> tuple[bool, dict]:
     return bool(all(gates.values())), dict(gates)
 
 
-def _evaluate_n2(paths: Sequence[Path]) -> tuple[bool, dict]:
+def _evaluate_n2(
+    paths: Sequence[Path],
+    recorded: Optional[Mapping[str, bool]] = None,
+) -> tuple[bool, dict]:
     fit = fit_punchout(paths[-1], prior_linewidth_mhz=0.5)
     gates = {
         "status_resolved": fit.status == "resolved",
@@ -148,6 +158,8 @@ def _evaluate_n2(paths: Sequence[Path]) -> tuple[bool, dict]:
             "pinned_parameters"
         ),
     }
+    if recorded is not None and "adaptive_rows" in recorded:
+        gates["adaptive_rows"] = len(fit.powers_db) <= 7
     return fit.passes(
         minimum_plateau_rows=2,
         minimum_shift_over_step=2.0,
@@ -155,7 +167,10 @@ def _evaluate_n2(paths: Sequence[Path]) -> tuple[bool, dict]:
     ), gates
 
 
-def _evaluate_n3(paths: Sequence[Path]) -> tuple[bool, dict]:
+def _evaluate_n3(
+    paths: Sequence[Path],
+    recorded: Optional[Mapping[str, bool]] = None,
+) -> tuple[bool, dict]:
     fit = fit_resonator_flux(
         paths[-1],
         period_min=0.12,
@@ -164,7 +179,15 @@ def _evaluate_n3(paths: Sequence[Path]) -> tuple[bool, dict]:
     gates = {
         "r_squared": fit.statistics["r_squared"] >= 0.95,
         "rmse_mhz": fit.statistics["rmse_mhz"] <= 0.2,
-        "complete_z_rows": len(fit.z_gain) >= 6,
+        (
+            "adaptive_z_rows"
+            if recorded is not None and "adaptive_z_rows" in recorded
+            else "complete_z_rows"
+        ): (
+            6 <= len(fit.z_gain) <= 7
+            if recorded is not None and "adaptive_z_rows" in recorded
+            else len(fit.z_gain) >= 6
+        ),
     }
     return fit.passes(
         minimum_r_squared=0.95,
@@ -432,8 +455,8 @@ def _evaluate(
 ) -> tuple[bool, dict]:
     evaluators = {
         "N1": _evaluate_n1,
-        "N2": _evaluate_n2,
-        "N3": _evaluate_n3,
+        "N2": lambda values: _evaluate_n2(values, recorded),
+        "N3": lambda values: _evaluate_n3(values, recorded),
         "N5": lambda values: _evaluate_n5(session, values, recorded),
         "N8": _evaluate_n8,
         "N9": _evaluate_n9,
@@ -451,17 +474,470 @@ def _evaluate(
     return evaluator(paths)
 
 
+def _hp_candidate(raw: Mapping[str, Any]) -> Candidate:
+    return Candidate(
+        candidate_id=str(raw["candidate_id"]),
+        center_mhz=float(raw["center_mhz"]),
+        fwhm_mhz=float(raw["fwhm_mhz"]),
+        contrast=float(raw["contrast"]),
+        center_uncertainty_mhz=float(raw["center_uncertainty_mhz"]),
+        local_snr=float(raw["local_snr"]),
+        rank=int(raw["rank"]),
+        source_csv=_native_pair(raw["source_csv"]),
+        window_mhz=tuple(float(value) for value in raw["window_mhz"]),
+        is_null=bool(raw.get("is_null", False)),
+        statistics=dict(raw.get("statistics", {})),
+    )
+
+
+def _assert_response_matches(
+    recorded: Mapping[str, Any],
+    replayed: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    if set(recorded) != set(replayed):
+        raise AnalysisError(
+            "hypothesis replay response fields changed for " + label
+        )
+    for name in recorded:
+        try:
+            matches = np.isclose(
+                float(recorded[name]),
+                float(replayed[name]),
+                rtol=1.0e-9,
+                atol=1.0e-9,
+                equal_nan=True,
+            )
+        except (TypeError, ValueError):
+            matches = recorded[name] == replayed[name]
+        if not bool(matches):
+            raise AnalysisError(
+                "hypothesis replay response changed for "
+                + label
+                + ":"
+                + str(name)
+            )
+
+
+def _assert_candidate_matches(
+    recorded: Candidate,
+    replayed: Candidate,
+) -> None:
+    label = recorded.candidate_id
+    if (
+        recorded.candidate_id != replayed.candidate_id
+        or recorded.rank != replayed.rank
+        or recorded.is_null != replayed.is_null
+        or recorded.source_csv != replayed.source_csv
+    ):
+        raise AnalysisError(
+            "hypothesis replay candidate identity changed for " + label
+        )
+    for name in (
+        "center_mhz",
+        "fwhm_mhz",
+        "contrast",
+        "center_uncertainty_mhz",
+        "local_snr",
+    ):
+        if not np.isclose(
+            float(getattr(recorded, name)),
+            float(getattr(replayed, name)),
+            rtol=1.0e-9,
+            atol=1.0e-9,
+            equal_nan=True,
+        ):
+            raise AnalysisError(
+                "hypothesis replay candidate field changed for "
+                + label
+                + ":"
+                + name
+            )
+    if not np.allclose(
+        np.asarray(recorded.window_mhz, dtype=float),
+        np.asarray(replayed.window_mhz, dtype=float),
+        rtol=1.0e-9,
+        atol=1.0e-9,
+        equal_nan=True,
+    ):
+        raise AnalysisError(
+            "hypothesis replay candidate window changed for " + label
+        )
+    _assert_response_matches(
+        recorded.statistics,
+        replayed.statistics,
+        label=label + ":statistics",
+    )
+
+
+def _replay_candidates_and_coverage(
+    event: Mapping[str, Any],
+    recorded_candidates: Sequence[Candidate],
+    recorded_coverage: CoverageAssessment,
+) -> tuple[tuple[Candidate, ...], CoverageAssessment, tuple[Path, ...]]:
+    """Re-extract N5 candidates and coverage from immutable fine traces."""
+    inputs = event.get("coverage_inputs")
+    if not isinstance(inputs, Mapping):
+        # Sessions created before coverage inputs were logged remain readable;
+        # new sessions take the full reconstruction path below.
+        return tuple(recorded_candidates), recorded_coverage, ()
+    measurements = inputs.get("fine_measurements", ())
+    if not isinstance(measurements, Sequence) or isinstance(
+        measurements,
+        (str, bytes),
+    ):
+        raise AnalysisError("hypothesis replay fine measurements must be a list")
+
+    selected_candidates = []
+    assessments = []
+    null_candidate = None
+    source_paths = []
+    for measurement in measurements:
+        if not isinstance(measurement, Mapping):
+            raise AnalysisError(
+                "hypothesis replay fine measurement must be a mapping"
+            )
+        source = _native_pair(measurement.get("source_csv"))
+        source_paths.append(source)
+        fit = fit_spectroscopy_features(
+            source,
+            kind="qubit",
+            signal="amplitude",
+        )
+        extracted = extract_candidates(fit)
+        real = [candidate for candidate in extracted if not candidate.is_null]
+        if real:
+            coarse_center = float(measurement["coarse_center_mhz"])
+            selected_candidates.append(
+                min(
+                    real,
+                    key=lambda candidate: abs(
+                        float(candidate.center_mhz) - coarse_center
+                    ),
+                )
+            )
+        if null_candidate is None:
+            null_candidate = next(
+                (candidate for candidate in extracted if candidate.is_null),
+                None,
+            )
+        assessments.append(
+            assess_coverage(
+                extracted,
+                prior_window=tuple(
+                    float(value) for value in measurement["prior_window"]
+                ),
+                scan_window=tuple(
+                    float(value) for value in measurement["scan_window"]
+                ),
+                points=int(measurement["points"]),
+                expected_fwhm_mhz=float(fit.parameters["fwhm_mhz"]),
+                expected_contrast=abs(float(fit.parameters["amplitude"])),
+            )
+        )
+    if not selected_candidates or null_candidate is None or not assessments:
+        raise AnalysisError(
+            "hypothesis replay could not reconstruct fine candidates"
+        )
+
+    selected_candidates.sort(
+        key=lambda candidate: abs(float(candidate.contrast)),
+        reverse=True,
+    )
+    deduplicated = []
+    for candidate in selected_candidates:
+        if any(
+            abs(float(candidate.center_mhz) - float(existing.center_mhz))
+            <= 0.5
+            * max(
+                abs(float(candidate.fwhm_mhz)),
+                abs(float(existing.fwhm_mhz)),
+            )
+            for existing in deduplicated
+        ):
+            continue
+        deduplicated.append(candidate)
+    ranked = tuple(
+        replace(candidate, rank=index)
+        for index, candidate in enumerate(deduplicated)
+    )
+    replayed_candidates = ranked + (
+        replace(null_candidate, rank=len(ranked)),
+    )
+    if len(replayed_candidates) != len(recorded_candidates):
+        raise AnalysisError("hypothesis replay candidate count changed")
+    for recorded, replayed in zip(recorded_candidates, replayed_candidates):
+        _assert_candidate_matches(recorded, replayed)
+
+    prior_low, prior_high = sorted(
+        float(value) for value in inputs["active_prior"]
+    )
+    scan_low, scan_high = sorted(
+        float(value) for value in inputs["coarse_scan_window"]
+    )
+    prior_coverage = max(
+        0.0,
+        min(prior_high, scan_high) - max(prior_low, scan_low),
+    ) / max(prior_high - prior_low, np.finfo(float).eps)
+    reasons = set()
+    if prior_coverage < float(inputs.get("minimum_prior_coverage", 0.9)):
+        reasons.add("prior_coverage")
+    for assessment in assessments:
+        reasons.update(assessment.reasons)
+    replayed_coverage = CoverageAssessment(
+        sufficient=not reasons,
+        reasons=tuple(sorted(reasons)),
+        prior_coverage=float(prior_coverage),
+        points_per_fwhm=float(
+            min(item.points_per_fwhm for item in assessments)
+        ),
+        detectable_contrast=float(
+            max(item.detectable_contrast for item in assessments)
+        ),
+        edge_margin_fwhm=float(
+            min(item.edge_margin_fwhm for item in assessments)
+        ),
+    )
+    if (
+        replayed_coverage.sufficient != recorded_coverage.sufficient
+        or replayed_coverage.reasons != recorded_coverage.reasons
+    ):
+        raise AnalysisError("hypothesis replay coverage verdict changed")
+    for name in (
+        "prior_coverage",
+        "points_per_fwhm",
+        "detectable_contrast",
+        "edge_margin_fwhm",
+    ):
+        if not np.isclose(
+            float(getattr(replayed_coverage, name)),
+            float(getattr(recorded_coverage, name)),
+            rtol=1.0e-9,
+            atol=1.0e-9,
+            equal_nan=True,
+        ):
+            raise AnalysisError(
+                "hypothesis replay coverage field changed: " + name
+            )
+    return replayed_candidates, replayed_coverage, tuple(source_paths)
+
+
+def _verify_hypothesis_event(
+    event_index: int,
+    event: Mapping[str, Any],
+) -> ReplayVerification:
+    candidates = tuple(
+        _hp_candidate(item)
+        for item in event.get("candidates", ())
+        if isinstance(item, Mapping)
+    )
+    if not candidates:
+        raise AnalysisError("hypothesis replay event has no candidates")
+    coverage_raw = event.get("coverage", {})
+    coverage = CoverageAssessment(
+        bool(coverage_raw.get("sufficient", False)),
+        tuple(coverage_raw.get("reasons", ())),
+        float(coverage_raw.get("prior_coverage", 0.0)),
+        float(coverage_raw.get("points_per_fwhm", 0.0)),
+        float(coverage_raw.get("detectable_contrast", "nan")),
+        float(coverage_raw.get("edge_margin_fwhm", 0.0)),
+    )
+    candidates, coverage, replayed_sources = _replay_candidates_and_coverage(
+        event,
+        candidates,
+        coverage,
+    )
+    recorded_responses = event.get("responses", {})
+    probe_files = event.get("probe_files", {})
+    replayed_responses = {}
+    paths = [candidate.source_csv for candidate in candidates]
+    paths.extend(replayed_sources)
+    for candidate_id, by_probe in probe_files.items():
+        if not isinstance(by_probe, Mapping):
+            raise AnalysisError("hypothesis replay probe files must be mappings")
+        for probe_id, raw_paths in by_probe.items():
+            native_paths = tuple(_native_pair(path) for path in raw_paths)
+            paths.extend(native_paths)
+            replayed = get_probe(probe_id).extract_response(native_paths)
+            recorded = recorded_responses.get(candidate_id, {}).get(probe_id)
+            if not isinstance(recorded, Mapping):
+                raise AnalysisError(
+                    "hypothesis replay is missing recorded response for "
+                    + str(candidate_id)
+                    + ":"
+                    + str(probe_id)
+                )
+            _assert_response_matches(
+                recorded,
+                replayed,
+                label=str(candidate_id) + ":" + str(probe_id),
+            )
+            replayed_responses.setdefault(str(candidate_id), {})[
+                str(probe_id)
+            ] = replayed
+    scorecard = build_scorecard(
+        candidates,
+        tuple(event.get("hypotheses", ())),
+        replayed_responses,
+        dict(event.get("device_context", {})),
+        family="qubit",
+    )
+    replayed = adjudicate(
+        scorecard,
+        coverage,
+        wanted=str(event.get("wanted", "qubit_01")),
+        margin_threshold=float(event.get("margin_threshold", 2.0)),
+        probes_remaining=False,
+        consistency_passes=consistency_passes(
+            tuple(event.get("predictions", ())),
+            str(event.get("wanted", "qubit_01")),
+            "qubit",
+            scorecard,
+        ),
+    )
+    recorded_adjudication = event.get("adjudication", {})
+    changed = {
+        "action": (recorded_adjudication.get("action"), replayed.action),
+        "candidate_id": (
+            recorded_adjudication.get("candidate_id"),
+            replayed.candidate_id,
+        ),
+        "hypothesis_id": (
+            recorded_adjudication.get("hypothesis_id"),
+            replayed.hypothesis_id,
+        ),
+    }
+    changed = {
+        name: values for name, values in changed.items() if values[0] != values[1]
+    }
+    recorded_margin = float(recorded_adjudication.get("margin", "nan"))
+    if not np.isclose(
+        recorded_margin,
+        replayed.margin,
+        rtol=1.0e-9,
+        atol=1.0e-9,
+        equal_nan=True,
+    ):
+        changed["margin"] = (recorded_margin, replayed.margin)
+    if changed:
+        raise AnalysisError(
+            "hypothesis replay diverged at event "
+            + str(event_index)
+            + ": "
+            + str(changed)
+        )
+    return ReplayVerification(
+        event_index=event_index,
+        node_id=str(event.get("node", "")),
+        csv_paths=tuple(dict.fromkeys(paths)),
+        recorded_decision=str(recorded_adjudication.get("action")),
+        replayed_decision=replayed.action,
+        gate_passes={
+            "coverage_sufficient": bool(coverage.sufficient),
+            "margin_passes": bool(
+                replayed.margin >= float(event.get("margin_threshold", 2.0))
+            ),
+        },
+    )
+
+
+def _verify_advisory_audit(session: AutocalSession) -> None:
+    """Verify logged advisor responses without making an external request."""
+    response_records = {}
+    policy_records = {}
+    audit_path = session.directory / "advisory.jsonl"
+    if audit_path.exists():
+        for line in audit_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            key = str(record.get("request_hash", ""))
+            if not key:
+                raise AnalysisError(
+                    "advisory audit contains an empty request hash"
+                )
+            if isinstance(record.get("response"), Mapping):
+                response_records.setdefault(key, record)
+            if record.get("record_type") == "policy_validation":
+                policy_records[key] = bool(record.get("policy_accepted"))
+
+    for index, event in enumerate(session.events()):
+        if event.get("event") != "advisor_completed":
+            continue
+        key = str(event.get("request_hash", ""))
+        if not key:
+            raise AnalysisError(
+                "advisor replay event has no request hash at event " + str(index)
+            )
+        event_response = event.get("response")
+        if not isinstance(event_response, Mapping):
+            raise AnalysisError(
+                "advisor replay event has no typed response at event " + str(index)
+            )
+        # Parsing is itself a schema replay check.
+        parsed = AdvisoryResponse.from_mapping(event_response).as_dict()
+        model = str(event.get("model", ""))
+        if model == "null":
+            expected_null = {
+                "hypothesis_label": "novel",
+                "proposed_action": {"action": "escalate"},
+                "confidence": 0.0,
+                "rationale": (
+                    "No external advisor is configured; deterministic "
+                    "escalation required."
+                ),
+                "discrepancy_notes": [],
+                "novel_program_sketch": None,
+            }
+            if parsed != expected_null:
+                raise AnalysisError(
+                    "NullAdvisor replay changed its escalation response"
+                )
+            continue
+        record = response_records.get(key)
+        if record is None:
+            raise AnalysisError(
+                "advisor replay has no audit response for request hash " + key
+            )
+        recorded = AdvisoryResponse.from_mapping(record["response"]).as_dict()
+        if recorded != parsed:
+            raise AnalysisError(
+                "advisor replay response changed for request hash " + key
+            )
+        audit_accepted = policy_records.get(
+            key,
+            bool(record.get("policy_accepted", False)),
+        )
+        if audit_accepted != bool(event.get("policy_accepted", False)):
+            raise AnalysisError(
+                "advisor replay policy decision changed for request hash " + key
+            )
+
+
 def verify_session_replay(session: AutocalSession) -> tuple:
     """Re-fit every logged decision and fail if any verdict changes."""
+    _verify_advisory_audit(session)
     acquisitions: dict[str, list[Path]] = {}
     verifications = []
+    hypothesis_nodes = set()
     for index, event in enumerate(session.events()):
         node_id = str(event.get("node", ""))
         if event.get("event") == "acquisition_completed":
             source = _native_pair(event.get("csv"))
             acquisitions.setdefault(node_id, []).append(source)
             continue
+        if event.get("event") == "hypothesis_adjudicated":
+            verifications.append(_verify_hypothesis_event(index, event))
+            hypothesis_nodes.add(node_id)
+            acquisitions[node_id] = []
+            continue
         if event.get("event") != "fit_evaluated":
+            continue
+        if node_id in hypothesis_nodes:
+            # The immediately preceding hypothesis event already replayed the
+            # identity verdict and every native probe response. This fit event
+            # is only the existing proposal/audit compatibility envelope.
             continue
 
         recorded = _recorded_gate_passes(event)

@@ -334,8 +334,8 @@ class SpectroscopyFit:
     iq: np.ndarray
     measured: np.ndarray
     fitted: np.ndarray
-    parameters: Mapping[str, float]
-    statistics: Mapping[str, float]
+    parameters: Mapping[str, Any]
+    statistics: Mapping[str, Any]
     metadata: Mapping[str, Any]
 
     @property
@@ -515,6 +515,9 @@ def fit_spectroscopy(
         "offset": float(parameters[0]),
         "slope_per_mhz": float(parameters[1]),
         "rotation_angle_rad": float(rotation.get("angle_rad", 0.0)),
+        "feature_polarity": (
+            "peak" if float(parameters[2]) >= 0 else "dip"
+        ),
     }
     statistics = {
         "r_squared": _r_squared(measured, fitted),
@@ -578,6 +581,7 @@ def plot_spectroscopy_fit(fit: SpectroscopyFit):
         ylabel=fit.signal_label,
         title=(
             f"{fit.kind.capitalize()} spectroscopy "
+            f"{fit.parameters['feature_polarity']} "
             f"($R^2$={fit.statistics['r_squared']:.4f})"
         ),
     )

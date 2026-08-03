@@ -505,10 +505,15 @@ def fit_readout_optimization(
         if isinstance(entry, (list, tuple)) and entry:
             columns[str(entry[0]).strip().lower().replace(" ", "_")] = index + 1
     try:
-        i_ground = matrix[:, columns["i_0"]]
-        q_ground = matrix[:, columns["q_0"]]
-        i_excited = matrix[:, columns["i_1"]]
-        q_excited = matrix[:, columns["q_1"]]
+        # Native Quick files use I 0/I 1 while the deterministic writer uses
+        # the equally explicit I Ground/I Excited labels.
+        def state_column(primary, alternate):
+            return columns[primary] if primary in columns else columns[alternate]
+
+        i_ground = matrix[:, state_column("i_0", "i_ground")]
+        q_ground = matrix[:, state_column("q_0", "q_ground")]
+        i_excited = matrix[:, state_column("i_1", "i_excited")]
+        q_excited = matrix[:, state_column("q_1", "q_excited")]
     except (KeyError, IndexError) as error:
         raise AnalysisError("dispersive CSV/YML is missing I/Q state columns") from error
     frequency = matrix[:, 0]

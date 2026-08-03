@@ -166,6 +166,10 @@ safety:
   park_flux_on_exit: true
 
 autocal:
+  # Both migrations are hardware-owned and opt-in. Empty preserves the legacy
+  # path until a deliberate supervised rollout enables N5 and/or N2/N3.
+  hypothesis_nodes: []
+  adaptive_nodes: []
   hard_stop_records:
     - defaults.r_offset
     - lookups.resonator_vs_flux
@@ -189,6 +193,22 @@ autocal:
     r_power_max_db: -20.0
   ramsey_sign:
     require_two_point_confirmation: true
+  hypothesis:
+    margin_threshold: 2.0
+    probe_budget_seconds: 600.0
+    top_k_candidates: 3
+    candidate_prominence_ratio: 0.5
+  backtracking:
+    max_backtracks_per_session: 3
+    max_backtracks_per_address: 2
+  adaptive:
+    initial_rows: 5
+    max_rows: 7
+    abort_after_rows: 5
+  advisor:
+    mode: "null"
+    model: claude-sonnet-5
+    timeout_seconds: 60.0
 
 expected:
   r_freq_mhz: [6800.0, 6950.0]

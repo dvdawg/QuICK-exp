@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 import shutil
 
@@ -87,6 +88,136 @@ def test_full_simulated_cold_start_completes_through_real_ide_path(tmp_path):
     )
     assert len(replay.verified_fits) == 10
     assert all(verification.matches for verification in replay.verified_fits)
+
+
+def test_n5_hypothesis_path_is_opt_in_audited_and_writes_ledgers(tmp_path):
+    _project(tmp_path)
+    hardware_path = tmp_path / "hardware.example.yml"
+    hardware = yaml.safe_load(hardware_path.read_text(encoding="utf-8"))
+    hardware["autocal"]["hypothesis_nodes"] = ["N5"]
+    hardware_path.write_text(
+        yaml.safe_dump(hardware, sort_keys=False),
+        encoding="utf-8",
+    )
+    result = run_autocal(
+        tmp_path,
+        target="flux_point",
+        autonomy_level=0,
+        backend=SyntheticBackend(
+            seed=17,
+            device=autocal_orchestrator._default_device(),
+        ),
+    )
+    state = yaml.safe_load(
+        (result.session_directory / "state.yml").read_text(encoding="utf-8")
+    )
+    assert state["nodes"]["N5"]["status"] == "done"
+    assert state["hypothesis_ledger"]["addresses"]["defaults.q_freq"]
+    entries = state["discrepancy_ledger"]["entries"]
+    assert {entry["prediction_id"] for entry in entries} == {
+        "f_q_band",
+        "chi",
+        "flux_period_agreement",
+        "anharmonicity",
+        "t2_bound",
+        "rabi_gain_linearity",
+        "readout_fidelity_vs_snr",
+    }
+    assert next(
+        entry for entry in entries if entry["prediction_id"] == "t2_bound"
+    )["verdict"] == "consistent"
+    assert (result.session_directory / "discrepancy-report.md").is_file()
+    events = [
+        json.loads(line)
+        for line in (result.session_directory / "decisions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    hp_event = next(event for event in events if event["event"] == "hypothesis_adjudicated")
+    assert hp_event["decision"] == "accept"
+    assert hp_event["adjudication"]["hypothesis_id"] == "qubit_01"
+    assert "r_squared" not in json.dumps(hp_event["scorecard"])
+    replay = run_autocal(tmp_path, replay_session=result.session_directory)
+    assert all(item.matches for item in replay.verified_fits)
+    assert any(item.node_id == "N5" for item in replay.verified_fits)
+
+
+def test_failed_rabi_revises_joint_frequency_gain_choice_before_blocking(
+    tmp_path,
+    monkeypatch,
+):
+    _project(tmp_path)
+    hardware_path = tmp_path / "hardware.example.yml"
+    hardware = yaml.safe_load(hardware_path.read_text(encoding="utf-8"))
+    hardware["autocal"]["hypothesis_nodes"] = ["N5"]
+    hardware_path.write_text(
+        yaml.safe_dump(hardware, sort_keys=False),
+        encoding="utf-8",
+    )
+    original_fit_rabi = autocal_nodes.fit_rabi
+    calls = {"count": 0}
+
+    def fail_first_rabi_attempts(csv_path, *args, **kwargs):
+        fit = original_fit_rabi(csv_path, *args, **kwargs)
+        calls["count"] += 1
+        if calls["count"] <= int(
+            hardware["autocal"]["budgets"]["max_node_attempts"]
+        ):
+            statistics = dict(fit.statistics)
+            statistics["r_squared"] = -1.0
+            return replace(fit, statistics=statistics)
+        return fit
+
+    monkeypatch.setattr(autocal_nodes, "fit_rabi", fail_first_rabi_attempts)
+    result = run_autocal(
+        tmp_path,
+        target="flux_point",
+        autonomy_level=0,
+    )
+    state = yaml.safe_load(
+        (result.session_directory / "state.yml").read_text(encoding="utf-8")
+    )
+    assert state["nodes"]["N8"]["status"] == "done"
+    entry = state["hypothesis_ledger"]["addresses"]["defaults.q_freq"]
+    assert entry["joint_retune_attempted"] is True
+    assert state["hypothesis_ledger"]["total_backtracks"] == 0
+    assert state["working_values"]["defaults.q_gain"] != pytest.approx(0.3)
+    events = [
+        json.loads(line)
+        for line in (result.session_directory / "decisions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    recovery = next(event for event in events if event["event"] == "upstream_doubt")
+    assert recovery["decision"] == "retune_joint_operating_point"
+
+
+def test_n2_n3_adaptive_paths_fit_with_at_most_seven_rows(tmp_path):
+    _project(tmp_path)
+    hardware_path = tmp_path / "hardware.example.yml"
+    hardware = yaml.safe_load(hardware_path.read_text(encoding="utf-8"))
+    hardware["autocal"]["adaptive_nodes"] = ["N2", "N3"]
+    hardware_path.write_text(
+        yaml.safe_dump(hardware, sort_keys=False),
+        encoding="utf-8",
+    )
+    result = run_autocal(
+        tmp_path,
+        target="full_cold_start",
+        autonomy_level=0,
+    )
+    state = yaml.safe_load(
+        (result.session_directory / "state.yml").read_text(encoding="utf-8")
+    )
+    assert state["nodes"]["N2"]["status"] == "done"
+    assert state["nodes"]["N3"]["status"] == "done"
+    for node_id, fixed_rows in (("N2", 11), ("N3", 13)):
+        schedule = state["adaptive_sweeps"][node_id]
+        assert len(schedule["rows"]) <= 7
+        assert len(schedule["rows"]) <= 0.60 * fixed_rows
+        assert schedule["aborted"] is False
+    replay = run_autocal(tmp_path, replay_session=result.session_directory)
+    assert all(item.matches for item in replay.verified_fits)
 
 
 def test_stop_resume_and_read_only_replay(tmp_path):

@@ -96,13 +96,15 @@ class NotchFit:
         )
 
 
-def _notch_initial_guess(trace: NativeTrace) -> tuple:
+def _notch_initial_guess(
+    trace: NativeTrace,
+    *,
+    center_mhz: Optional[float] = None,
+) -> tuple:
     x = trace.x
     iq = trace.iq
     magnitude = np.abs(iq)
     smoothed = gaussian_filter1d(magnitude, 2.0, mode="nearest")
-    minimum_index = int(np.argmin(smoothed))
-    center = float(x[minimum_index])
     edge_count = max(3, min(30, x.size // 5))
     edge_indices = np.r_[:edge_count, x.size - edge_count : x.size]
     reference = float(np.mean(x))
@@ -111,12 +113,28 @@ def _notch_initial_guess(trace: NativeTrace) -> tuple:
         magnitude[edge_indices],
         1,
     )
-    baseline_level = float(np.median(magnitude[edge_indices]))
-    half_depth = float(smoothed[minimum_index] + (baseline_level - smoothed[minimum_index]) / 2)
-    below = np.flatnonzero(smoothed <= half_depth)
+    baseline = a0 + a1 * (x - reference)
+    deviation = smoothed - baseline
+    feature_index = (
+        int(np.argmax(np.abs(deviation)))
+        if center_mhz is None
+        else int(np.argmin(np.abs(x - float(center_mhz))))
+    )
+    center = float(x[feature_index])
+    half_contrast = 0.5 * float(deviation[feature_index])
+    if half_contrast >= 0:
+        inside = deviation >= half_contrast
+    else:
+        inside = deviation <= half_contrast
+    left = feature_index
+    right = feature_index
+    while left > 0 and inside[left - 1]:
+        left -= 1
+    while right < x.size - 1 and inside[right + 1]:
+        right += 1
     linewidth = (
-        float(x[below[-1]] - x[below[0]])
-        if below.size >= 2
+        float(x[right] - x[left])
+        if right > left
         else float(np.ptp(x) / 20.0)
     )
     linewidth = max(linewidth, float(np.median(np.diff(x))))
@@ -130,7 +148,7 @@ def _notch_initial_guess(trace: NativeTrace) -> tuple:
         1j * (phi0 + tau * (center - reference))
     )
     coupling = (
-        1.0 - iq[minimum_index] / baseline_center
+        1.0 - iq[feature_index] / baseline_center
         if abs(baseline_center) > np.finfo(float).eps
         else 0.5 + 0j
     )
@@ -191,18 +209,20 @@ def fit_complex_notch(csv_path: Path) -> NotchFit:
         iq=iq,
         metadata=trace.metadata,
     )
-    initial = _notch_initial_guess(window_trace)
+    initial = _notch_initial_guess(window_trace, center_mhz=center_seed)
     initial[0] = center_seed
     initial[1] = max(linewidth_seed, 2.0 * step)
-    initial[6] = float(
-        np.clip(
-            abs(scalar.parameters["amplitude"])
-            / max(initial[2], np.finfo(float).eps),
-            0.005,
-            1.5,
+    initial[6:8] = np.clip(initial[6:8], -1.5, 1.5)
+    if np.hypot(initial[6], initial[7]) < 0.005:
+        initial[6] = float(
+            np.clip(
+                -float(scalar.parameters["amplitude"])
+                / max(initial[2], np.finfo(float).eps),
+                -1.5,
+                1.5,
+            )
         )
-    )
-    initial[7] = 0.0
+        initial[7] = 0.0
     amplitude_scale = max(float(np.max(np.abs(iq))), np.finfo(float).eps)
     lower = np.asarray(
         [
@@ -285,11 +305,7 @@ def fit_complex_notch(csv_path: Path) -> NotchFit:
         / max(abs(fitted_center), np.finfo(float).eps)
     )
     rmse = float(np.sqrt(np.mean(np.abs(residual_complex) ** 2)))
-    magnitude_depth = max(
-        float(np.median(np.abs(iq)[np.r_[: max(2, x.size // 5), -max(2, x.size // 5) :]]))
-        - float(np.min(np.abs(iq))),
-        0.0,
-    )
+    magnitude_contrast = abs(float(scalar.parameters["amplitude"]))
     names = list(NOTCH_PARAMETER_NAMES)
     pinned = pinned_parameters(
         dict(zip(names, result.x)),
@@ -323,6 +339,7 @@ def fit_complex_notch(csv_path: Path) -> NotchFit:
         "coupling_real": float(c_re),
         "coupling_imag": float(c_im),
         "reference_mhz": float(center),
+        "feature_polarity": scalar.parameters["feature_polarity"],
     }
     edge_distance = float(
         min(reported_center - x[0], x[-1] - reported_center)
@@ -331,7 +348,9 @@ def fit_complex_notch(csv_path: Path) -> NotchFit:
         "r_squared_complex": complex_r2,
         "r_squared_amplitude": amplitude_r2,
         "rmse": rmse,
-        "contrast_snr": float(magnitude_depth / max(rmse, np.finfo(float).eps)),
+        "contrast_snr": float(
+            magnitude_contrast / max(rmse, np.finfo(float).eps)
+        ),
         "edge_distance_over_fwhm": float(edge_distance / abs(linewidth)),
         "edge_distance_mhz": edge_distance,
         "pinned_parameters": pinned,
@@ -399,7 +418,11 @@ def plot_notch_fit(fit: NotchFit):
     axes[0].plot(fit.x, np.abs(fit.iq), "o", markersize=3, label="data")
     axes[0].plot(fit.x, np.abs(fit.fitted_complex), "-", linewidth=2, label=fit.model)
     axes[0].axvline(fit.center_mhz, color="tab:red", linestyle="--")
-    axes[0].set(xlabel="Readout frequency (MHz)", ylabel="|S21|", title="Resonator notch")
+    axes[0].set(
+        xlabel="Readout frequency (MHz)",
+        ylabel="|S21|",
+        title=f"Resonator {fit.parameters.get('feature_polarity', 'feature')}",
+    )
     axes[0].grid(alpha=0.3)
     axes[0].legend()
     axes[1].plot(fit.x, np.abs(fit.iq) - np.abs(fit.fitted_complex), ".-")
@@ -430,7 +453,10 @@ def notch_calibration_record(fit: NotchFit) -> dict:
             "fitted_at": utc_now(),
             "analysis": "quickexp_v3.notch_fit.fit_notch",
         },
-        "quality": dict(fit.statistics),
+        "quality": {
+            **dict(fit.statistics),
+            "feature_polarity": fit.parameters.get("feature_polarity"),
+        },
         "valid_domain": {
             "z_gain": [
                 float(
@@ -481,6 +507,49 @@ def _lorentz_model(x, parameters, components, reference):
     return values
 
 
+def _seed_lorentz_hwhm(residual, index, step, span):
+    """Estimate a component width from its local half-height crossings.
+
+    A span-derived seed is much wider than the narrow lines in a coarse
+    spectroscopy trace.  With two components that caused the first seed to
+    subtract most of the second feature and let both optimized centres
+    collapse onto the dominant line.  The local half-height scale gives the
+    optimizer distinct, physically plausible starting basins without adding
+    a feature-selection threshold.
+    """
+    values = np.asarray(residual, dtype=float)
+    peak = abs(float(values[index]))
+    minimum = max(2.0 * abs(float(step)), np.finfo(float).eps)
+    fallback = max(minimum, abs(float(span)) / 50.0)
+    if not np.isfinite(peak) or peak <= np.finfo(float).eps:
+        return fallback
+
+    polarity = np.sign(values[index])
+    half_height = 0.5 * peak
+    left = int(index)
+    while (
+        left > 0
+        and np.sign(values[left - 1]) == polarity
+        and abs(float(values[left - 1])) >= half_height
+    ):
+        left -= 1
+    right = int(index)
+    while (
+        right + 1 < values.size
+        and np.sign(values[right + 1]) == polarity
+        and abs(float(values[right + 1])) >= half_height
+    ):
+        right += 1
+
+    distances = []
+    if left < index:
+        distances.append((index - left) * abs(float(step)))
+    if right > index:
+        distances.append((right - index) * abs(float(step)))
+    width = float(np.mean(distances)) if distances else fallback
+    return float(np.clip(width, minimum, max(abs(float(span)) / 4.0, minimum)))
+
+
 def _fit_lorentz_components(x, measured, components):
     reference = float(np.mean(x))
     span = float(np.ptp(x))
@@ -491,9 +560,9 @@ def _fit_lorentz_components(x, measured, components):
     deviation = measured - (offset + slope * (x - reference))
     seeds = []
     residual = deviation.copy()
-    width = max(2 * step, span / 20)
     for _ in range(components):
         index = int(np.argmax(np.abs(residual)))
+        width = _seed_lorentz_hwhm(residual, index, step, span)
         seeds.extend([float(residual[index]), float(x[index]), width])
         residual = residual - seeds[-3] / (1.0 + ((x - seeds[-2]) / width) ** 2)
     initial = np.asarray([offset, slope] + seeds)
@@ -634,6 +703,9 @@ def fit_spectroscopy_features(
                 "center_mhz": float(values[cursor + 1]),
                 "center_uncertainty_mhz": float(errors[cursor + 1]),
                 "hwhm_mhz": abs(float(values[cursor + 2])),
+                "feature_polarity": (
+                    "peak" if float(values[cursor]) >= 0 else "dip"
+                ),
             }
         )
     features.sort(key=lambda feature: abs(feature["amplitude"]), reverse=True)
@@ -657,6 +729,7 @@ def fit_spectroscopy_features(
         "rotation_angle_rad": float(rotation["angle_rad"]),
         "rotation_flipped": bool(rotation["flipped"]),
         "features": features,
+        "feature_polarity": primary["feature_polarity"],
     }
     statistics = {
         "r_squared": r_squared(measured, fitted),

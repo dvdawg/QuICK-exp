@@ -26,11 +26,13 @@ LIVE_HARDWARE = False
 # None selects the newest *ResVsZ_held_bias*.csv in the configured Quick folder.
 INPUT_CSV = None
 SCAN_NAME = DEFAULT_SCAN_NAME
-# "fit" = refined notch centers plus the cosine fit.
+# "fit" = refined peak/dip centers plus the cosine fit.
 # "min"/"max" = select that smoothed frequency bin per Z row and interpolate.
 # Use min/max when the cosine fit is unreliable; set SMOOTH_SIGMA_BINS = 0 to
 # take the extrema from the raw rows.
 FIT_METHOD = "fit"
+# "auto" chooses the stronger map-wide polarity; "dip"/"peak" override it.
+FEATURE_POLARITY = "auto"
 SMOOTH_SIGMA_BINS = 2.0
 PERIOD_MIN = None
 PERIOD_MAX = None
@@ -64,6 +66,7 @@ def main():
         source,
         fit_method=FIT_METHOD,
         smooth_sigma_bins=SMOOTH_SIGMA_BINS,
+        feature_polarity=FEATURE_POLARITY,
         period_min=PERIOD_MIN,
         period_max=PERIOD_MAX,
     )
@@ -75,6 +78,7 @@ def main():
     )
     print(f"Calibration source: {fit.source_csv}")
     print(f"Calibration method: {fit.fit_method}")
+    print(f"Detected feature polarity: {fit.feature_polarity}")
     if fit.fit_method == "fit":
         parameters = fit.parameters
         statistics = fit.statistics

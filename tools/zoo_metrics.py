@@ -18,6 +18,8 @@ class DecisionResult:
     value: Optional[float]
     simulated_seconds: float = 0.0
     wrong_value_propagated: bool = False
+    hypothesis_margin: Optional[float] = None
+    hypothesis_id: Optional[str] = None
 
 
 def _blank() -> dict:

@@ -70,18 +70,20 @@ def write_pair(
         ("qubit", "QubitSpectroscopy", "Qubit Pulse Frequency", 5603.9),
     ],
 )
+@pytest.mark.parametrize("feature_amplitude", (-0.8, 0.8))
 def test_spectroscopy_fit_recovers_center(
     tmp_path,
     kind,
     quick_class,
     axis_label,
     center,
+    feature_amplitude,
 ):
     frequency = np.linspace(center - 5.0, center + 5.0, 201)
     signal = (
-        0.2
+        1.2
         + 0.003 * (frequency - center)
-        - 0.8 / (1.0 + ((frequency - center) / 0.4) ** 2)
+        + feature_amplitude / (1.0 + ((frequency - center) / 0.4) ** 2)
     )
     source = write_pair(
         tmp_path / f"{quick_class}.csv",
@@ -92,9 +94,12 @@ def test_spectroscopy_fit_recovers_center(
         signal=signal,
         var={"z_gain": 0.1},
     )
-    fit = fit_spectroscopy(source, kind=kind, signal="IQ")
+    fit = fit_spectroscopy(source, kind=kind, signal="amplitude")
     assert fit.center_mhz == pytest.approx(center, abs=1e-4)
     assert fit.statistics["r_squared"] > 0.999
+    assert fit.parameters["feature_polarity"] == (
+        "peak" if feature_amplitude > 0 else "dip"
+    )
 
 
 def test_t1_fit_recovers_lifetime(tmp_path):

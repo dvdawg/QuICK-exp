@@ -62,6 +62,24 @@ def test_complex_notch_recovers_synthetic_center_and_linewidth(tmp_path):
     assert fit.statistics["r_squared_complex"] > 0.98
 
 
+def test_complex_notch_recovers_magnitude_peak(tmp_path):
+    rng = np.random.default_rng(8)
+    frequency = np.linspace(6878.0, 6890.0, 301)
+    parameters = [6884.2, 0.8, 1.0, 0.002, 0.3, 0.3, -0.55, 0.08]
+    iq = complex_notch_model(frequency, parameters)
+    iq += 0.002 * (
+        rng.normal(size=frequency.size) + 1j * rng.normal(size=frequency.size)
+    )
+    source = tmp_path / "peak.csv"
+    _write_complex(source, frequency, iq)
+
+    fit = fit_notch(source, allow_fallback=False)
+
+    assert fit.center_mhz == pytest.approx(6884.2, abs=0.05)
+    assert fit.parameters["feature_polarity"] == "peak"
+    assert fit.statistics["contrast_snr"] > 5.0
+
+
 def test_two_feature_selection_requires_explicit_window(tmp_path):
     frequency = np.linspace(5590.0, 5610.0, 401)
     signal = (

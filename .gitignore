@@ -13,3 +13,7 @@ analysis_out/
 autocal_runs/
 plans/
 docs/
+!docs/
+docs/*
+!docs/autocal-baseline.md
+!docs/AUTOCAL.md

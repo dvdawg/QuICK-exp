@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+import numpy as np
+
 from ..backend import SyntheticBackend
 from ..errors import AcquisitionError, ConfigError
 from ..ide import load_repository
@@ -18,7 +20,13 @@ from .graph import (
     invalidated_nodes,
     target_nodes,
 )
-from .nodes import NodeOutcome, SessionContext, StopRequested, run_node
+from .nodes import (
+    NodeOutcome,
+    SessionContext,
+    StopRequested,
+    consult_advisor,
+    run_node,
+)
 from .policy import load_autocal_policy
 from .replay import verify_session_replay
 from .session import AutocalSession, replay_decisions
@@ -111,6 +119,195 @@ def _selected_dependency_blocked(
         if status == "blocked":
             return dependency
     return None
+
+
+def _recover_failed_rabi_identity(
+    context: SessionContext,
+    outcome: NodeOutcome,
+) -> bool:
+    """Try joint retuning, then the next N5 ledger candidate, within caps."""
+    from .hp.ledger import BacktrackLimitExceeded, HypothesisLedger
+
+    raw = context.session.state.get("hypothesis_ledger")
+    if not isinstance(raw, Mapping) or not raw:
+        return False
+    ledger = HypothesisLedger.from_dict(raw)
+    address = "defaults.q_freq"
+    try:
+        decision = ledger.upstream_doubt(
+            address,
+            {
+                "node": "N8",
+                "reason": outcome.reason,
+                "last_csv": outcome.last_csv,
+                "gates": to_builtin(outcome.gates or {}),
+            },
+            joint_retune_available=True,
+        )
+    except BacktrackLimitExceeded as error:
+        context.session.event(
+            "backtrack_exhausted",
+            node="N8",
+            decision="escalate",
+            reason=str(error),
+            address=address,
+        )
+        return False
+    context.session.state["hypothesis_ledger"] = ledger.as_dict()
+    if decision.action == "retune_joint_operating_point":
+        current_gain = abs(float(context.working_value("defaults.q_gain", 0.4)))
+        increased = min(current_gain * 1.25, context.policy.q_gain_max)
+        next_gain = (
+            increased
+            if increased > current_gain + 1.0e-12
+            else current_gain * 0.8
+        )
+        context.session.set_working_values({"defaults.q_gain": next_gain})
+        reason = "retry Rabi after bounded q_gain joint retune"
+    else:
+        leader = ledger.leader(address)
+        if leader is None or "center_mhz" not in leader:
+            return False
+        context.session.set_working_values(
+            {address: float(leader["center_mhz"])}
+        )
+        reason = "retry Rabi with the next non-demoted N5 candidate"
+    context.session.update_node(
+        "N8",
+        status="pending",
+        attempts=0,
+        reason=reason,
+    )
+    context.session.event(
+        "upstream_doubt",
+        node="N8",
+        decision=decision.action,
+        reason=reason,
+        address=address,
+        demoted_candidate_id=decision.demoted_candidate_id,
+        promoted_candidate_id=decision.promoted_candidate_id,
+        working_q_freq=context.working_value(address),
+        working_q_gain=context.working_value("defaults.q_gain"),
+        total_backtracks=ledger.total_backtracks,
+    )
+    return True
+
+
+def _finalize_discrepancy_ledger(
+    context: SessionContext,
+    hardware: Mapping[str, Any],
+) -> None:
+    """Complete the operator report, explicitly marking unavailable tests."""
+    raw = context.session.state.get("discrepancy_ledger")
+    if not isinstance(raw, Mapping):
+        return
+    from .hp.ledger import DiscrepancyLedger, render_discrepancy_report
+
+    ledger = DiscrepancyLedger.from_dict(raw)
+    working = context.session.state.get("working_values", {})
+    working = working if isinstance(working, Mapping) else {}
+    expected = hardware.get("expected", {})
+    expected = expected if isinstance(expected, Mapping) else {}
+    q_band = expected.get("q_freq_mhz")
+    q_frequency = working.get("defaults.q_freq")
+    if isinstance(q_band, (list, tuple)) and len(q_band) == 2:
+        low, high = sorted(float(value) for value in q_band)
+        ledger.record(
+            "f_q_band",
+            0.5 * (low + high),
+            None if q_frequency is None else float(q_frequency),
+            max((high - low) / 6.0, 1.0e-9),
+            ("design band represented as a three-sigma prior",),
+            ("hardware.expected", "N5"),
+        )
+
+    t1 = working.get("derived.t1")
+    t2_values = [
+        working.get("derived.t2_ramsey"),
+        working.get("derived.t2_echo.cycle_0"),
+    ]
+    finite_t2 = [
+        float(value)
+        for value in t2_values
+        if value is not None and np.isfinite(float(value))
+    ]
+    if t1 is not None and finite_t2:
+        bound = 2.0 * float(t1)
+        ledger.record_upper_bound(
+            "t2_bound",
+            bound,
+            max(finite_t2),
+            max(0.05 * abs(bound), 1.0e-9),
+            ("T2 cannot exceed twice T1 for a passive two-level system",),
+            ("N11", "N12", "N13"),
+        )
+
+    required = {
+        "f_q_band": (
+            "design band and session qubit spectroscopy are both available",
+            ("hardware.expected", "N5"),
+        ),
+        "chi": (
+            "dispersive approximation and candidate-state preparation",
+            ("N5",),
+        ),
+        "flux_period_agreement": (
+            "qubit and readout share a SQUID-loop period",
+            ("N3", "N5"),
+        ),
+        "anharmonicity": (
+            "a resolved f02 two-photon shadow is present",
+            ("N5",),
+        ),
+        "t2_bound": (
+            "T1 and at least one T2 estimate are available",
+            ("N11", "N12", "N13"),
+        ),
+        "rabi_gain_linearity": (
+            "two weak-drive Rabi rates are resolved",
+            ("N5",),
+        ),
+        "readout_fidelity_vs_snr": (
+            "two Gaussian readout clouds describe the labeled shots",
+            ("N9",),
+        ),
+    }
+    present = set(ledger.prediction_ids())
+    for prediction_id, (assumption, sources) in required.items():
+        if prediction_id not in present:
+            ledger.record(
+                prediction_id,
+                None,
+                None,
+                None,
+                (assumption,),
+                sources,
+            )
+    context.session.state["discrepancy_ledger"] = ledger.as_dict()
+    context.session.save()
+    report_path = context.session.directory / "discrepancy-report.md"
+    report_path.write_text(
+        render_discrepancy_report(ledger),
+        encoding="utf-8",
+    )
+    context.session.event(
+        "discrepancy_ledger_finalized",
+        node="SESSION",
+        decision="report",
+        reason="all declared circuit-QED predictions are represented",
+        report=str(report_path),
+        prediction_count=len(ledger.entries),
+        deviant=[
+            entry.prediction_id
+            for entry in ledger.entries
+            if entry.verdict == "deviant"
+        ],
+        untestable=[
+            entry.prediction_id
+            for entry in ledger.entries
+            if entry.verdict == "untestable"
+        ],
+    )
 
 
 def _record_leaves(node: Mapping[str, Any], prefix: str = "") -> dict:
@@ -345,6 +542,24 @@ def run_autocal(
     )
     session.state["status"] = "running"
     session.save()
+    if not session.state.get("advisor_session_start_complete", False):
+        consult_advisor(
+            context,
+            trigger="session_start",
+            node_id="SESSION",
+            device_context={
+                "expected": to_builtin(
+                    repository.hardware.get("expected", {})
+                ),
+                "working_values": to_builtin(
+                    session.state.get("working_values", {})
+                ),
+                "target": target,
+                "z_gain": float(z_gain),
+            },
+        )
+        session.state["advisor_session_start_complete"] = True
+        session.save()
 
     selected = set(selected_ids)
     for spec in specs:
@@ -513,6 +728,16 @@ def run_autocal(
                     outcome.classification,
                 )
 
+            if (
+                spec.node_id == "N8"
+                and outcome.status == "blocked"
+                and attempt >= policy.max_node_attempts
+                and policy.hypothesis_enabled("N5")
+                and _recover_failed_rabi_identity(context, outcome)
+            ):
+                node_state = session.node(spec.node_id)
+                continue
+
             final_status = "done" if outcome.status in {"done", "skipped"} else "blocked"
             session.update_node(
                 spec.node_id,
@@ -543,6 +768,7 @@ def run_autocal(
                 )
             break
 
+    _finalize_discrepancy_ledger(context, repository.hardware)
     statuses = {
         details.get("status")
         for details in session.state.get("nodes", {}).values()
@@ -551,6 +777,24 @@ def run_autocal(
         "completed_with_escalations"
         if "blocked" in statuses
         else "completed"
+    )
+    consult_advisor(
+        context,
+        trigger="session_end",
+        node_id="SESSION",
+        scorecard={
+            "status": final_status,
+            "nodes": to_builtin(session.state.get("nodes", {})),
+            "budget": budget.as_dict(),
+        },
+        device_context={
+            "expected": to_builtin(repository.hardware.get("expected", {})),
+            "working_values": to_builtin(
+                session.state.get("working_values", {})
+            ),
+            "target": target,
+            "z_gain": float(z_gain),
+        },
     )
     session.event(
         "session_completed",

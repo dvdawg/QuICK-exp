@@ -735,7 +735,10 @@ class SyntheticBackend:
                 )
                 iq = (
                     0.1
-                    + 0.75 / (1.0 + 1j * detuning)
+                    + device.qubit_spectroscopy_strength(
+                        variable("q_gain", 0.0)
+                    )
+                    / (1.0 + 1j * detuning)
                     + device.extra_spectral_response(
                         "qubit",
                         frequency,
@@ -754,6 +757,16 @@ class SyntheticBackend:
                     variable("r_power", -35.0),
                     variable("z_gain", 0.0),
                 )
+                true_qubit = device.qubit_frequency(variable("z_gain", 0.0))
+                qubit_detuning = variable("q_freq", true_qubit) - true_qubit
+                excitation_width = np.maximum(
+                    device.qubit_linewidth(variable("q_gain", 0.0)),
+                    1.0e-9,
+                )
+                excitation = 1.0 / (
+                    1.0 + (2.0 * qubit_detuning / excitation_width) ** 2
+                )
+                observed_shift = float(device.dispersive_shift_mhz) * excitation
                 width = max(float(device.resonator_linewidth_mhz), 1e-9)
                 ground = 1.0 - 0.5 / (
                     1.0 + 2j * (frequency - center) / width
@@ -764,7 +777,7 @@ class SyntheticBackend:
                     * (
                         frequency
                         - center
-                        - float(device.dispersive_shift_mhz)
+                        - observed_shift
                     )
                     / width
                 ) + noise
@@ -782,9 +795,9 @@ class SyntheticBackend:
                     ]
                 )
                 data = np.column_stack(columns)
-                truth["dispersive_shift_mhz"] = float(
-                    device.dispersive_shift_mhz
-                )
+                truth["dispersive_shift_mhz"] = np.asarray(
+                    observed_shift
+                ).tolist()
                 return BackendResult(
                     payload=data,
                     metadata={

@@ -1,0 +1,5 @@
+schema_version: 1
+# Populate this list with operator-reviewed cooldown traces. Each entry needs:
+# csv, correct_value, correct_hypothesis, notes, and optionally session plus
+# tolerance_mhz. A session reference enables full probe/adjudication replay.
+traces: []

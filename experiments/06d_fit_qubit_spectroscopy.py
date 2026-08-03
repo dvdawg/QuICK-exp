@@ -83,6 +83,7 @@ def main():
     )
     print(f"Fit source: {fit.source_csv}")
     print(f"Fit signal: {fit.signal_label}")
+    print(f"Detected feature polarity: {fit.parameters['feature_polarity']}")
     print(
         f"Qubit frequency: {fit.center_mhz:.9f} +/- "
         f"{fit.parameters['center_uncertainty_mhz']:.3g} MHz"

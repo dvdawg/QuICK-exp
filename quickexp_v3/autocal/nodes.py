@@ -263,6 +263,18 @@ def _native_matrix(planned: Any, completed: Any) -> np.ndarray:
     return np.column_stack(columns)
 
 
+def _materialized_native_directory(ctx: SessionContext) -> Path:
+    """Keep live derived native pairs beside Quick data, never session state."""
+    if not ctx.live_hardware:
+        return ctx.session.native_directory
+    configured = ctx.repository().hardware.get("storage", {}).get(
+        "quick_native_root"
+    )
+    if not configured:
+        raise ConfigError("live autocal requires storage.quick_native_root")
+    return Path(str(configured)).expanduser().resolve()
+
+
 def _native_path(
     ctx: SessionContext,
     *,
@@ -485,6 +497,200 @@ def _fit_event(
     )
 
 
+def consult_advisor(
+    ctx: SessionContext,
+    *,
+    trigger: str,
+    node_id: str,
+    candidates: Tuple[Mapping[str, Any], ...] = (),
+    probe_responses: Tuple[Mapping[str, Any], ...] = (),
+    scorecard: Optional[Mapping[str, Any]] = None,
+    device_context: Optional[Mapping[str, Any]] = None,
+    images: Tuple[Path, ...] = (),
+) -> Any:
+    """Call and validate the configured out-of-band advisor, never execute it."""
+    from .hp.advisor import (
+        AdvisoryRequest,
+        AdvisorError,
+        ClaudeAdvisor,
+        NullAdvisor,
+        ReplayAdvisor,
+        request_hash,
+        validate_response,
+    )
+    from .hp.taxonomy import hypothesis_ids
+
+    discrepancies = ctx.session.state.get("discrepancy_ledger", {}).get(
+        "entries", ()
+    )
+    advisory_request = AdvisoryRequest(
+        trigger=str(trigger),
+        node_id=str(node_id),
+        candidates=tuple(candidates),
+        probe_responses=tuple(probe_responses),
+        scorecard=dict(scorecard or {}),
+        discrepancies=tuple(discrepancies),
+        device_context=dict(device_context or {}),
+        images=tuple(images),
+    )
+    audit_path = ctx.session.directory / "advisory.jsonl"
+    if ctx.policy.advisor_mode == "claude":
+        advisor = ClaudeAdvisor(
+            model=ctx.policy.advisor_model,
+            audit_path=audit_path,
+            timeout_seconds=ctx.policy.advisor_timeout_seconds,
+        )
+    elif ctx.policy.advisor_mode == "replay":
+        advisor = ReplayAdvisor(audit_path)
+    else:
+        advisor = NullAdvisor()
+    response = None
+    policy_logged = False
+    try:
+        response = advisor.advise(advisory_request)
+        repository = ctx.repository()
+        experiment_presets = {}
+        for preset_name, preset in repository.presets.items():
+            experiment = (
+                preset.get("experiment") if isinstance(preset, Mapping) else None
+            )
+            if experiment:
+                experiment_presets.setdefault(str(experiment), []).append(
+                    str(preset_name)
+                )
+        action = response.proposed_action or {}
+        estimate = 0.0
+        if "experiment" in action:
+            planned = ExperimentRunner(
+                repository,
+                ctx.backend or SyntheticBackend(seed=0),
+            ).plan(
+                str(action["experiment"]),
+                str(action["preset"]),
+                overrides=dict(action.get("overrides", {})),
+                title=f"{ctx.session.session_id}_{node_id}_advisory_preview",
+            )
+            estimate = ctx.budget_model.estimate(planned.plan)
+        all_hypotheses = tuple(
+            dict.fromkeys(hypothesis_ids("qubit") + hypothesis_ids("resonator"))
+        )
+        remaining = max(
+            ctx.budget.max_wall_clock_seconds - ctx.budget.spent_seconds,
+            0.0,
+        )
+        validate_response(
+            response,
+            hypothesis_ids=all_hypotheses,
+            experiment_presets=experiment_presets,
+            limits=repository.hardware.get("limits", {}),
+            remaining_budget_seconds=remaining,
+            estimated_action_seconds=estimate,
+        )
+        proposal_accepted = bool("experiment" in action)
+        if isinstance(advisor, ClaudeAdvisor):
+            advisor.audit_policy_decision(
+                advisory_request,
+                policy_accepted=proposal_accepted,
+            )
+            policy_logged = True
+        if proposal_accepted:
+            proposals = ctx.session.state.setdefault("advisory_proposals", [])
+            proposals.append(
+                {
+                    "request_hash": request_hash(advisory_request),
+                    "node_id": node_id,
+                    "trigger": trigger,
+                    "response": response.as_dict(),
+                    "estimated_seconds": float(estimate),
+                    "status": "validated_not_executed",
+                }
+            )
+            ctx.session.save()
+        for divergence in getattr(advisor, "divergences", ()):
+            divergence_details = {
+                str(key): value
+                for key, value in dict(divergence).items()
+                if str(key) != "event"
+            }
+            ctx.session.event(
+                "advisory_divergence",
+                node=node_id,
+                decision="escalate",
+                reason="ReplayAdvisor found no matching request hash",
+                **to_builtin(divergence_details),
+            )
+        ctx.session.event(
+            "advisor_completed",
+            node=node_id,
+            decision=("proposed" if proposal_accepted else "escalate"),
+            reason=response.rationale,
+            trigger=trigger,
+            request_hash=request_hash(advisory_request),
+            model=getattr(advisor, "model", ctx.policy.advisor_mode),
+            response=response.as_dict(),
+            policy_accepted=proposal_accepted,
+            executed=False,
+            replay_divergences=to_builtin(
+                getattr(advisor, "divergences", ())
+            ),
+        )
+        return response
+    except (AdvisorError, ConfigError, ValueError) as error:
+        if (
+            isinstance(advisor, ClaudeAdvisor)
+            and response is not None
+            and not policy_logged
+        ):
+            advisor.audit_policy_decision(
+                advisory_request,
+                policy_accepted=False,
+            )
+        ctx.session.event(
+            "advisor_failed",
+            node=node_id,
+            decision="escalate",
+            reason=f"{type(error).__name__}: {error}",
+            trigger=trigger,
+            request_hash=request_hash(advisory_request),
+        )
+        return NullAdvisor().advise(advisory_request)
+
+
+def _hypothesis_overlay(
+    ctx: SessionContext,
+    result: Any,
+) -> Tuple[Path, ...]:
+    directory = ctx.session.directory / "advisory_images"
+    directory.mkdir(parents=True, exist_ok=True)
+    images = []
+    seen = set()
+    for candidate in result.candidates:
+        if candidate.is_null or candidate.source_csv in seen:
+            continue
+        seen.add(candidate.source_csv)
+        fit = fit_spectroscopy_features(
+            candidate.source_csv,
+            kind="qubit",
+            signal="amplitude",
+        )
+        figure, axis = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
+        axis.plot(fit.x, fit.measured, ".", markersize=3, label="measured")
+        axis.plot(fit.x, fit.fitted, "-", linewidth=1.5, label="fit")
+        axis.axvline(candidate.center_mhz, color="tab:red", linestyle="--")
+        axis.set(
+            xlabel="Qubit frequency (MHz)",
+            ylabel=fit.signal_label,
+            title="N5 candidate " + candidate.candidate_id,
+        )
+        axis.legend()
+        axis.grid(alpha=0.25)
+        path = directory / (candidate.candidate_id + ".png")
+        figure.savefig(path, dpi=150)
+        plt.close(figure)
+        images.append(path)
+    return tuple(images)
+
+
 def _n0(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
     repository = ctx.repository()
     connection = ide.inspect_connection(
@@ -616,6 +822,8 @@ def _n1(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
 
 
 def _n2(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    if ctx.policy.adaptive_enabled("N2"):
+        return _n2_adaptive(ctx, spec, attempt)
     center = float(ctx.working_value("defaults.r_freq", 6884.0))
     frequency = centered_sweep(
         center,
@@ -703,7 +911,221 @@ def _n2(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
     return NodeOutcome("done", "punchout plateaus fitted", values, proposals, str(csv_path), gates)
 
 
+def _store_adaptive_schedule(
+    ctx: SessionContext,
+    node_id: str,
+    scheduler: Any,
+    *,
+    fixed_grid_rows: int,
+) -> None:
+    schedules = ctx.session.state.setdefault("adaptive_sweeps", {})
+    schedules[node_id] = scheduler.as_dict()
+    ctx.session.save()
+    ctx.session.event(
+        "adaptive_map_completed",
+        node=node_id,
+        decision="abort" if scheduler.aborted else "fit",
+        reason=(
+            scheduler.abort_reason
+            if scheduler.aborted
+            else "adaptive row cap reached"
+        ),
+        rows=len(scheduler.rows),
+        fixed_grid_rows=int(fixed_grid_rows),
+        row_fraction=float(len(scheduler.rows) / max(fixed_grid_rows, 1)),
+        schedule=scheduler.as_dict(),
+    )
+
+
+def _n2_adaptive(
+    ctx: SessionContext,
+    spec: NodeSpec,
+    attempt: int,
+) -> NodeOutcome:
+    from .hp.adaptive import AdaptiveRowScheduler, tracked_frequency_axis
+
+    repository = ctx.repository()
+    max_rows = min(ctx.policy.adaptive_max_rows, 6)
+    scheduler = AdaptiveRowScheduler(
+        (-45.0, -20.0),
+        min(ctx.policy.adaptive_initial_rows, max_rows),
+        max_rows,
+        min(ctx.policy.adaptive_abort_after_rows, max_rows),
+    )
+    base_center = float(ctx.working_value("defaults.r_freq", 6884.0))
+    row_matrices = []
+    row_axes = []
+    first_plan = None
+    last_csv = None
+    while not scheduler.done:
+        if len(scheduler.rows) == scheduler.initial_rows:
+            # Punchout needs both asymptotic plateaus, so the one adaptive
+            # follow-up resolves the sparsely sampled high-power side of the
+            # observed transition instead of spending it on another low row.
+            measured_powers = sorted(row.value for row in scheduler.rows)
+            power = 0.5 * (measured_powers[-2] + measured_powers[-1])
+        else:
+            power = scheduler.next_row()
+        frequency = tracked_frequency_axis(
+            base_center,
+            30.0,
+            121 if attempt == 1 else 241,
+            repository.hardware["limits"]["r_freq"],
+        )
+        completed, planned, last_csv = _acquire(
+            ctx,
+            node_id=spec.node_id,
+            experiment="resonator_spectroscopy",
+            preset="resonator_fine",
+            overrides={
+                "r_freq": frequency,
+                "r_power": float(power),
+                "hard_avg": _averaging_value(
+                    ctx,
+                    "resonator_fine",
+                    attempt,
+                ),
+            },
+        )
+        if first_plan is None:
+            first_plan = planned
+        matrix = _native_matrix(planned, completed)
+        row_matrices.append(
+            np.column_stack((np.full(matrix.shape[0], power), matrix))
+        )
+        row_axes.append(np.asarray(frequency, dtype=float))
+        try:
+            row_fit = fit_complex_notch(last_csv)
+            center = float(row_fit.center_mhz)
+            trackable = bool(
+                np.isfinite(center)
+                and float(frequency[0]) < center < float(frequency[-1])
+            )
+            uncertainty = float(
+                row_fit.parameters.get("center_uncertainty_mhz", np.nan)
+            )
+        except (AnalysisError, ValueError, FloatingPointError):
+            center = None
+            uncertainty = None
+            trackable = False
+        scheduler.record(
+            power,
+            center_mhz=center,
+            trackable=trackable,
+            uncertainty_mhz=uncertainty,
+        )
+    _store_adaptive_schedule(ctx, spec.node_id, scheduler, fixed_grid_rows=11)
+    if scheduler.aborted:
+        return NodeOutcome(
+            "retake",
+            scheduler.abort_reason,
+            {},
+            last_csv=str(last_csv) if last_csv else None,
+            classification={
+                "failure_class": "A",
+                "coverage_reasons": ("trackability",),
+                "candidate_count": sum(row.trackable for row in scheduler.rows),
+                "proposed_remediation": "readout_power",
+            },
+        )
+    powers = np.asarray([row.value for row in scheduler.rows], dtype=float)
+    map_plan = replace(
+        first_plan.plan,
+        axes=("r_power", "r_freq"),
+        variables={
+            **dict(first_plan.plan.variables),
+            "r_power": powers,
+            "r_freq": np.vstack(row_axes),
+        },
+        axis_units={"r_power": "dB", "r_freq": "MHz"},
+        title=f"{ctx.session.session_id}_{spec.node_id}_adaptive_map",
+    )
+    csv_path = write_native_pair(
+        _materialized_native_directory(ctx),
+        map_plan,
+        BackendResult(payload=np.vstack(row_matrices)),
+        index=ctx.budget.total_runs + 1,
+        title=map_plan.title,
+        extra_metadata={"adaptive_schedule": scheduler.as_dict()},
+    )
+    fit = fit_punchout(csv_path, prior_linewidth_mhz=0.5)
+    passed = fit.passes(
+        minimum_plateau_rows=2,
+        minimum_shift_over_step=2.0,
+        maximum_transition_width_db=15.0,
+    )
+    gates = {
+        "status_resolved": _gate(fit.status, "resolved", fit.status == "resolved"),
+        "shift_over_step": _gate(
+            fit.statistics["shift_over_frequency_step"],
+            ">= 2",
+            fit.statistics["shift_over_frequency_step"] >= 2,
+        ),
+        "low_plateau_rows": _gate(
+            fit.statistics["low_plateau_rows"],
+            ">= 2",
+            fit.statistics["low_plateau_rows"] >= 2,
+        ),
+        "high_plateau_rows": _gate(
+            fit.statistics["high_plateau_rows"],
+            ">= 2",
+            fit.statistics["high_plateau_rows"] >= 2,
+        ),
+        "transition_width_db": _gate(
+            fit.parameters.get("transition_width_db", "unavailable"),
+            "<= 15",
+            bool(
+                fit.status == "resolved"
+                and fit.parameters["transition_width_db"] <= 15.0
+            ),
+        ),
+        "parameters_not_pinned": _gate(
+            fit.statistics.get("pinned_parameters", []),
+            "empty",
+            not fit.statistics.get("pinned_parameters"),
+        ),
+        "adaptive_rows": _gate(len(scheduler.rows), "<= 7", len(scheduler.rows) <= 7),
+    }
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=csv_path,
+        gates=gates,
+        passed=passed,
+        reason="adaptive punchout resolved" if passed else "adaptive punchout unresolved",
+    )
+    if not passed:
+        return NodeOutcome(
+            "retake",
+            "adaptive punchout plateaus unresolved",
+            {},
+            last_csv=str(csv_path),
+            gates=gates,
+        )
+    record = punchout_calibration_record(fit)
+    plateau = float(fit.parameters["f_low_mhz"])
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records={"defaults.r_power": record},
+        gates_pass=True,
+        gate_table=gates,
+    )
+    session_values = {"session.f_r_plateau": plateau}
+    ctx.session.set_working_values(session_values)
+    return NodeOutcome(
+        "done",
+        "adaptive punchout plateaus fitted",
+        {**values, **session_values},
+        proposals,
+        str(csv_path),
+        gates,
+    )
+
+
 def _n3(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
+    if ctx.policy.adaptive_enabled("N3"):
+        return _n3_adaptive(ctx, spec, attempt)
     z_values = np.linspace(-0.30, 0.30, 13)
     rows = []
     first_plan = None
@@ -908,6 +1330,183 @@ def _n3(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
     return NodeOutcome("done", "resonator flux lookup fitted", values, proposals, str(csv_path), gates)
 
 
+def _n3_adaptive(
+    ctx: SessionContext,
+    spec: NodeSpec,
+    attempt: int,
+) -> NodeOutcome:
+    from .hp.adaptive import AdaptiveRowScheduler, tracked_frequency_axis
+
+    repository = ctx.repository()
+    scheduler = AdaptiveRowScheduler(
+        (-0.30, 0.30),
+        ctx.policy.adaptive_initial_rows,
+        ctx.policy.adaptive_max_rows,
+        ctx.policy.adaptive_abort_after_rows,
+    )
+    try:
+        lookup = repository.calibration["records"]["lookups"][
+            "resonator_vs_flux"
+        ]
+        map_center = float(lookup["value"]["parameters"]["center_frequency"])
+    except (KeyError, TypeError, ValueError):
+        map_center = float(ctx.working_value("defaults.r_freq", 6884.0))
+    previous_center = map_center
+    row_matrices = []
+    row_axes = []
+    first_plan = None
+    last_csv = None
+    while not scheduler.done:
+        z_gain = scheduler.next_row()
+        frequency = tracked_frequency_axis(
+            previous_center,
+            6.0,
+            101,
+            repository.hardware["limits"]["r_freq"],
+        )
+        completed, planned, last_csv = _acquire(
+            ctx,
+            node_id=spec.node_id,
+            experiment="resonator_spectroscopy",
+            preset="resonator_fine",
+            overrides={
+                "r_freq": frequency,
+                "z_gain": float(z_gain),
+                "hard_avg": _averaging_value(
+                    ctx,
+                    "resonator_fine",
+                    attempt,
+                ),
+            },
+        )
+        if first_plan is None:
+            first_plan = planned
+        matrix = _native_matrix(planned, completed)
+        row_matrices.append(
+            np.column_stack((np.full(matrix.shape[0], z_gain), matrix))
+        )
+        row_axes.append(np.asarray(frequency, dtype=float))
+        try:
+            row_fit = fit_complex_notch(last_csv)
+            center = float(row_fit.center_mhz)
+            trackable = bool(
+                np.isfinite(center)
+                and float(frequency[0]) < center < float(frequency[-1])
+            )
+            uncertainty = float(
+                row_fit.parameters.get("center_uncertainty_mhz", np.nan)
+            )
+        except (AnalysisError, ValueError, FloatingPointError):
+            center = None
+            uncertainty = None
+            trackable = False
+        scheduler.record(
+            z_gain,
+            center_mhz=center,
+            trackable=trackable,
+            uncertainty_mhz=uncertainty,
+        )
+        if trackable and center is not None:
+            previous_center = center
+    _store_adaptive_schedule(ctx, spec.node_id, scheduler, fixed_grid_rows=13)
+    if scheduler.aborted:
+        return NodeOutcome(
+            "retake",
+            scheduler.abort_reason,
+            {},
+            last_csv=str(last_csv) if last_csv else None,
+            classification={
+                "failure_class": "A",
+                "coverage_reasons": ("trackability",),
+                "candidate_count": sum(row.trackable for row in scheduler.rows),
+                "proposed_remediation": "window",
+            },
+        )
+    z_values = np.asarray([row.value for row in scheduler.rows], dtype=float)
+    map_plan = replace(
+        first_plan.plan,
+        axes=("z_gain", "r_freq"),
+        variables={
+            **dict(first_plan.plan.variables),
+            "z_gain": z_values,
+            "r_freq": np.vstack(row_axes),
+        },
+        axis_units={"z_gain": "", "r_freq": "MHz"},
+        title=f"{ctx.session.session_id}_{spec.node_id}_adaptive_map",
+    )
+    csv_path = write_native_pair(
+        _materialized_native_directory(ctx),
+        map_plan,
+        BackendResult(payload=np.vstack(row_matrices)),
+        index=ctx.budget.total_runs + 1,
+        title=map_plan.title,
+        extra_metadata={"adaptive_schedule": scheduler.as_dict()},
+    )
+    fit = fit_resonator_flux(
+        csv_path,
+        period_min=0.12,
+        period_max=0.30,
+    )
+    passed = fit.passes(minimum_r_squared=0.95, maximum_rmse_mhz=0.2)
+    gates = {
+        "r_squared": _gate(
+            fit.statistics["r_squared"],
+            ">= 0.95",
+            fit.statistics["r_squared"] >= 0.95,
+        ),
+        "rmse_mhz": _gate(
+            fit.statistics["rmse_mhz"],
+            "<= 0.2",
+            fit.statistics["rmse_mhz"] <= 0.2,
+        ),
+        "adaptive_z_rows": _gate(
+            len(fit.z_gain),
+            "6 to 7 rows",
+            6 <= len(fit.z_gain) <= 7,
+        ),
+    }
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=csv_path,
+        gates=gates,
+        passed=passed,
+        reason="adaptive resonator flux cosine passed"
+        if passed
+        else "adaptive resonator flux cosine failed",
+    )
+    if not passed:
+        return NodeOutcome(
+            "retake",
+            "adaptive resonator flux fit failed",
+            {},
+            last_csv=str(csv_path),
+            gates=gates,
+        )
+    record = resonator_flux_calibration_record(fit)
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records={"lookups.resonator_vs_flux": record},
+        gates_pass=True,
+        gate_table=gates,
+    )
+    lookup_session_values = {
+        "session.resonator_lookup_rmse_mhz": float(fit.statistics["rmse_mhz"]),
+        "session.resonator_lookup_z_min": float(np.min(fit.z_gain)),
+        "session.resonator_lookup_z_max": float(np.max(fit.z_gain)),
+    }
+    ctx.session.set_working_values(lookup_session_values)
+    return NodeOutcome(
+        "done",
+        "adaptive resonator flux lookup fitted",
+        {**values, **lookup_session_values},
+        proposals,
+        str(csv_path),
+        gates,
+    )
+
+
 def _n4(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
     lookup_frequency, lookup_rmse, lookup_source = (
         _resonator_lookup_prediction(ctx)
@@ -1039,6 +1638,789 @@ def _spectroscopy_record(fit: Any, z_gain: float) -> dict:
         },
         valid_domain={"z_gain": [float(z_gain), float(z_gain)]},
         model="lorentzian_feature_with_bic_model_selection",
+    )
+
+
+def _candidate_payload(candidate: Any) -> dict:
+    return {
+        "candidate_id": str(candidate.candidate_id),
+        "center_mhz": float(candidate.center_mhz),
+        "fwhm_mhz": float(candidate.fwhm_mhz),
+        "contrast": float(candidate.contrast),
+        "center_uncertainty_mhz": float(candidate.center_uncertainty_mhz),
+        "local_snr": float(candidate.local_snr),
+        "rank": int(candidate.rank),
+        "source_csv": str(candidate.source_csv),
+        "window_mhz": list(candidate.window_mhz),
+        "is_null": bool(candidate.is_null),
+        "statistics": to_builtin(dict(candidate.statistics)),
+    }
+
+
+def _n5_hp_device_context(
+    ctx: SessionContext,
+    candidates: Tuple[Any, ...],
+) -> dict:
+    repository = ctx.repository()
+    defaults = repository.hardware.get("defaults", {})
+    expected = repository.hardware.get("expected", {})
+    real = [candidate for candidate in candidates if not candidate.is_null]
+    frequency_scale = max(
+        [abs(float(candidate.center_mhz)) for candidate in real] or [5600.0]
+    )
+    period = abs(float(expected.get("flux_period_z", 0.3)))
+    period = max(period, 1.0e-6)
+    linewidths = [abs(float(candidate.fwhm_mhz)) for candidate in real]
+    linewidth = float(np.median(linewidths)) if linewidths else 1.0
+    null_candidates = [candidate for candidate in candidates if candidate.is_null]
+    detectable = (
+        float(null_candidates[0].statistics.get("detectable_contrast", linewidth))
+        if null_candidates
+        else linewidth
+    )
+    prominence = max(
+        [abs(float(candidate.contrast)) for candidate in real] or [0.0]
+    )
+    q_gain = min(
+        max(0.15, 0.5 * abs(float(defaults.get("q_gain", 0.3)))),
+        ctx.policy.q_gain_max,
+    )
+    return {
+        "q_gain": q_gain,
+        "q_gain_max": float(ctx.policy.q_gain_max),
+        "z_gain": float(ctx.z_gain),
+        "r_freq": float(ctx.working_value("defaults.r_freq", 6884.0)),
+        "resonator_linewidth_mhz": float(
+            expected.get("resonator_linewidth_mhz", 0.5)
+        ),
+        "resonator_flux_period_z": period,
+        "q_delta_mhz": float(defaults.get("q_delta", -180.0)),
+        "power_exponent_tolerance": 0.35,
+        "flux_slope_tolerance_mhz_per_z": max(
+            4.0 * frequency_scale / period,
+            linewidth / max(period / 1500.0, 1.0e-9),
+        ),
+        "flux_curvature_tolerance_mhz_per_z2": max(
+            4.0 * frequency_scale / (period ** 2),
+            linewidth / max((period / 1500.0) ** 2, 1.0e-12),
+        ),
+        "rabi_exponent_tolerance": 0.35,
+        "rabi_contrast_tolerance": 0.20,
+        "dispersive_shift_tolerance_mhz": max(
+            0.5 * float(expected.get("dispersive_shift_mhz", 1.0)),
+            0.1,
+        ),
+        "qubit_flux_slope_mhz_per_z": float(
+            expected.get("qubit_flux_slope_mhz_per_z", 0.0)
+        ),
+        "qubit_flux_curvature_mhz_per_z2": float(
+            expected.get("qubit_flux_curvature_mhz_per_z2", 0.0)
+        ),
+        "neighbor_flux_slope_mhz_per_z": float(
+            expected.get("neighbor_flux_slope_mhz_per_z", 0.0)
+        ),
+        "neighbor_flux_curvature_mhz_per_z2": float(
+            expected.get("neighbor_flux_curvature_mhz_per_z2", 0.0)
+        ),
+        "expected_rabi_contrast": float(
+            expected.get("rabi_contrast", 0.7)
+        ),
+        "expected_neighbor_rabi_contrast": 0.0,
+        "expected_dispersive_shift_mhz": float(
+            expected.get("dispersive_shift_mhz", 1.0)
+        ),
+        # The null explanation is penalized by measured detectability, not a
+        # fit-quality gate or a device-specific constant.
+        "null_candidate_score": float(
+            -0.5
+            * (prominence / max(detectable, np.finfo(float).eps)) ** 2
+        ),
+        "estimated_probe_run_seconds": float(
+            max(ctx.budget_model.fixed_overhead_seconds, 1.0)
+        ),
+    }
+
+
+def _acquire_flux_probe(
+    ctx: SessionContext,
+    *,
+    node_id: str,
+    probe: Any,
+    runs: Tuple[Mapping[str, Any], ...],
+) -> Tuple[Path, ...]:
+    """Acquire P2 through the reviewed held-flux sweep and split native rows."""
+    if not runs:
+        return ()
+    repository = ctx.repository()
+    safe_runs = [ctx.policy.clamp_overrides(dict(run)) for run in runs]
+    z_values = np.asarray([float(run["z_gain"]) for run in safe_runs])
+    base = dict(safe_runs[0])
+    base.pop("z_gain", None)
+    base["hard_avg"] = _averaging_value(ctx, probe.preset, 1)
+    planned_rows = []
+    predicted_rows = []
+    planner_backend = ctx.backend or SyntheticBackend(seed=0)
+    for run in safe_runs:
+        overrides = dict(base)
+        overrides.update(run)
+        planned = ExperimentRunner(repository, planner_backend).plan(
+            probe.experiment,
+            probe.preset,
+            overrides=overrides,
+            title=f"{ctx.session.session_id}_{node_id}_{probe.probe_id}",
+        )
+        planned_rows.append(planned)
+        predicted_rows.append(ctx.budget_model.estimate(planned.plan))
+    starts = {}
+    observations = []
+
+    def before_row(row_index: int, _z_gain: float) -> None:
+        if ctx.session.stop_requested():
+            raise StopRequested("autocal_runs/STOP was found")
+        ctx.budget.check(predicted_rows[row_index])
+        starts[row_index] = time.monotonic()
+
+    def after_row(row_index: int, z_gain: float, completed: Optional[Any]) -> None:
+        measured = time.monotonic() - starts.get(row_index, time.monotonic())
+        predicted = predicted_rows[row_index]
+        ctx.budget.record(measured)
+        ctx.budget_model.observe(predicted, measured)
+        ctx.session.set_budget(ctx.budget.as_dict())
+        observations.append((row_index, z_gain, measured, completed))
+
+    completed_rows = ide.run_flux_sweep(
+        ctx.project_root,
+        experiment=probe.experiment,
+        preset=probe.preset,
+        flux_values=z_values,
+        overrides=base,
+        title=f"{ctx.session.session_id}_{node_id}_{probe.probe_id}",
+        live_hardware=ctx.live_hardware,
+        analyze_rows=False,
+        show_plot=False,
+        backend=ctx.backend,
+        before_row=before_row,
+        after_row=after_row,
+    )
+    plt.close("all")
+    if len(completed_rows) != len(planned_rows):
+        raise AnalysisError(
+            f"{node_id} {probe.probe_id} acquired "
+            f"{len(completed_rows)} of {len(planned_rows)} rows"
+        )
+    first_index = ctx.budget.total_runs - len(completed_rows) + 1
+    paths = []
+    for row_index, (planned, completed) in enumerate(
+        zip(planned_rows, completed_rows)
+    ):
+        path = write_native_pair(
+            _materialized_native_directory(ctx),
+            planned.plan,
+            BackendResult(payload=_native_matrix(planned, completed)),
+            index=first_index + row_index,
+            title=planned.plan.title + "_row",
+        )
+        paths.append(path)
+        measured = observations[row_index][2]
+        ctx.session.event(
+            "acquisition_completed",
+            node=node_id,
+            decision="fit",
+            reason="held-flux hypothesis probe row is complete",
+            csv=str(path),
+            probe_id=probe.probe_id,
+            z_gain=float(z_values[row_index]),
+            points=int(completed.data.points),
+            predicted_seconds=float(predicted_rows[row_index]),
+            measured_seconds=float(measured),
+            total_runs=int(ctx.budget.total_runs),
+        )
+    return tuple(paths)
+
+
+def _persist_hypothesis_result(
+    ctx: SessionContext,
+    result: Any,
+    *,
+    product_address: str,
+    device_context: Mapping[str, Any],
+    coverage_inputs: Mapping[str, Any],
+    probe_files: Mapping[str, Mapping[str, Tuple[str, ...]]],
+    hypothesis_ids_in_play: Tuple[str, ...],
+    predictions: Tuple[str, ...],
+) -> None:
+    from .hp.ledger import (
+        DiscrepancyLedger,
+        HypothesisLedger,
+        render_discrepancy_report,
+    )
+
+    raw_hypotheses = ctx.session.state.get("hypothesis_ledger", {})
+    hypotheses = (
+        HypothesisLedger.from_dict(raw_hypotheses)
+        if isinstance(raw_hypotheses, Mapping) and raw_hypotheses
+        else HypothesisLedger(
+            ctx.policy.max_backtracks_per_session,
+            ctx.policy.max_backtracks_per_address,
+        )
+    )
+    candidate_by_id = {
+        candidate.candidate_id: candidate for candidate in result.candidates
+    }
+    ranking = []
+    seen = set()
+    for row in result.scorecard.rows:
+        candidate = candidate_by_id.get(row.candidate_id)
+        if candidate is None or candidate.is_null or row.candidate_id in seen:
+            continue
+        seen.add(row.candidate_id)
+        ranking.append(
+            {
+                "candidate_id": row.candidate_id,
+                "hypothesis_id": row.hypothesis_id,
+                "score": float(row.total_score),
+                "center_mhz": float(candidate.center_mhz),
+                "source_csv": str(candidate.source_csv),
+            }
+        )
+    if ranking:
+        hypotheses.record(
+            product_address,
+            ranking,
+            evidence={
+                "node_id": result.node_id,
+                "probes_run": list(result.probes_run),
+                "scorecard": result.scorecard.as_dict(),
+            },
+        )
+    raw_discrepancies = ctx.session.state.get("discrepancy_ledger", {})
+    discrepancies = (
+        DiscrepancyLedger.from_dict(raw_discrepancies)
+        if isinstance(raw_discrepancies, Mapping)
+        else DiscrepancyLedger()
+    )
+    leader_responses = result.responses.get(
+        result.adjudication.candidate_id,
+        {},
+    )
+    context = _n5_hp_device_context(ctx, result.candidates)
+    rabi = leader_responses.get("rabi_ping", {})
+    if "rabi_gain_exponent" in rabi:
+        discrepancies.record(
+            "rabi_gain_linearity",
+            1.0,
+            float(rabi["rabi_gain_exponent"]),
+            float(context["rabi_exponent_tolerance"]),
+            ("weak-drive linear response",),
+            (result.node_id,),
+        )
+    flux = leader_responses.get("flux_nudge", {})
+    if "flux_slope_mhz_per_z" in flux:
+        discrepancies.record(
+            "flux_period_agreement",
+            float(context["qubit_flux_slope_mhz_per_z"]),
+            float(flux["flux_slope_mhz_per_z"]),
+            float(context["flux_slope_tolerance_mhz_per_z"]),
+            ("qubit and readout share the configured SQUID-loop period",),
+            (result.node_id,),
+        )
+    dispersive = leader_responses.get("dispersive_response", {})
+    if "dispersive_shift_mhz" in dispersive:
+        discrepancies.record(
+            "chi",
+            0.5 * float(context["expected_dispersive_shift_mhz"]),
+            0.5 * float(dispersive["dispersive_shift_mhz"]),
+            0.5 * float(context["dispersive_shift_tolerance_mhz"]),
+            ("dispersive approximation", "candidate prepares this qubit"),
+            (result.node_id,),
+        )
+    real_candidates = [
+        candidate for candidate in result.candidates if not candidate.is_null
+    ]
+    leader_candidate = candidate_by_id.get(result.adjudication.candidate_id)
+    if leader_candidate is not None and len(real_candidates) >= 2:
+        q_delta = float(device_context.get("q_delta_mhz", -180.0))
+        alternate = min(
+            (
+                candidate
+                for candidate in real_candidates
+                if candidate.candidate_id != leader_candidate.candidate_id
+            ),
+            key=lambda candidate: abs(
+                abs(candidate.center_mhz - leader_candidate.center_mhz)
+                - abs(q_delta) / 2.0
+            ),
+        )
+        measured_delta = -2.0 * abs(
+            alternate.center_mhz - leader_candidate.center_mhz
+        )
+        sigma = max(
+            abs(q_delta) * 0.10,
+            2.0
+            * (
+                abs(leader_candidate.center_uncertainty_mhz)
+                + abs(alternate.center_uncertainty_mhz)
+            ),
+        )
+        discrepancies.record(
+            "anharmonicity",
+            q_delta,
+            measured_delta,
+            sigma,
+            ("the secondary feature is the f02 two-photon shadow",),
+            (result.node_id,),
+        )
+    ctx.session.state["hypothesis_ledger"] = hypotheses.as_dict()
+    ctx.session.state["discrepancy_ledger"] = discrepancies.as_dict()
+    ctx.session.save()
+    report_path = ctx.session.directory / "discrepancy-report.md"
+    report_path.write_text(
+        render_discrepancy_report(discrepancies),
+        encoding="utf-8",
+    )
+    ctx.session.event(
+        "hypothesis_adjudicated",
+        node=result.node_id,
+        decision=result.adjudication.action,
+        reason=result.adjudication.reason,
+        source_csv=str(result.source_csv),
+        candidates=[_candidate_payload(item) for item in result.candidates],
+        coverage=to_builtin(result.coverage.__dict__),
+        coverage_inputs=to_builtin(dict(coverage_inputs)),
+        responses=to_builtin(result.responses),
+        scorecard=result.scorecard.as_dict(),
+        adjudication=to_builtin(result.adjudication.__dict__),
+        probes_run=list(result.probes_run),
+        probe_seconds=float(result.probe_seconds),
+        product_address=product_address,
+        probe_files=to_builtin(probe_files),
+        device_context=to_builtin(device_context),
+        hypotheses=list(hypothesis_ids_in_play),
+        predictions=list(predictions),
+        wanted="qubit_01",
+        margin_threshold=float(ctx.policy.margin_threshold),
+        discrepancy_report=str(report_path),
+    )
+
+
+def _n5_hypothesis(
+    ctx: SessionContext,
+    spec: NodeSpec,
+    attempt: int,
+) -> NodeOutcome:
+    from .hp.candidates import extract_candidates
+    from .hp.coverage import CoverageAssessment, assess_coverage
+    from .hp.engine import HypothesisNodeSpec, run as run_hypothesis
+    from .hp.taxonomy import hypothesis_ids
+
+    repository = ctx.repository()
+    q_delta_mhz = float(repository.hardware["defaults"].get("q_delta", -180.0))
+    ctx.session.set_working_values({"session.q_delta_mhz": q_delta_mhz})
+    limits = repository.hardware["limits"]["q_freq"]
+    expected_q = repository.hardware.get("expected", {}).get("q_freq_mhz")
+    if isinstance(expected_q, (list, tuple)) and len(expected_q) == 2:
+        prior_window = tuple(sorted(float(value) for value in expected_q))
+    else:
+        accepted = float(ctx.working_value("defaults.q_freq", 5600.0))
+        prior_window = (accepted - 1000.0, accepted + 1000.0)
+    working = ctx.session.state.get("working_values", {})
+    forced_center = (
+        working.get("session.n5_hp_derived_center_mhz")
+        if isinstance(working, Mapping)
+        else None
+    )
+    if forced_center is not None:
+        coarse_center = float(forced_center)
+        coarse_span = min(400.0, float(np.ptp(limits)))
+        active_prior = (
+            coarse_center - coarse_span / 2.0,
+            coarse_center + coarse_span / 2.0,
+        )
+    else:
+        coarse_center = 0.5 * (prior_window[0] + prior_window[1])
+        coarse_span = min(float(np.ptp(prior_window)), float(np.ptp(limits)))
+        active_prior = prior_window
+    if attempt > 1 and forced_center is None:
+        coarse_span = min(
+            max(3.0 * coarse_span, 4000.0),
+            float(np.ptp(limits)),
+        )
+    coarse_points = min(max(int(round(coarse_span)) + 1, 801), 4001)
+    coarse_axis = centered_sweep(
+        coarse_center,
+        coarse_span,
+        coarse_points,
+        bounds=limits,
+    )
+    _completed, _planned, coarse_csv = _acquire(
+        ctx,
+        node_id=spec.node_id,
+        experiment="qubit_spectroscopy",
+        preset="qubit_coarse",
+        overrides={
+            "q_freq": coarse_axis,
+            "hard_avg": _averaging_value(ctx, "qubit_coarse", attempt),
+        },
+    )
+    coarse_fit = fit_spectroscopy_features(
+        coarse_csv,
+        kind="qubit",
+        signal="amplitude",
+    )
+    coarse_candidates = [
+        candidate
+        for candidate in extract_candidates(coarse_fit)
+        if not candidate.is_null
+    ][: ctx.policy.top_k_candidates]
+    fine_candidates = []
+    fine_assessments = []
+    fine_measurements = []
+    null_candidate = None
+    fine_gain = min(
+        max(
+            0.15,
+            0.5 * abs(float(repository.hardware["defaults"].get("q_gain", 0.3))),
+        ),
+        ctx.policy.q_gain_max,
+    )
+    for coarse_candidate in coarse_candidates:
+        half_width = max(5.0 * abs(float(coarse_candidate.fwhm_mhz)), 5.0)
+        fine_axis = centered_sweep(
+            coarse_candidate.center_mhz,
+            2.0 * half_width,
+            201,
+            bounds=limits,
+        )
+        _fine_run, _fine_plan, fine_csv = _acquire(
+            ctx,
+            node_id=spec.node_id,
+            experiment="qubit_spectroscopy",
+            preset="qubit_fine",
+            overrides={
+                "q_freq": fine_axis,
+                "q_gain": fine_gain,
+                "hard_avg": _averaging_value(ctx, "qubit_fine", attempt),
+            },
+        )
+        fine_fit = fit_spectroscopy_features(
+            fine_csv,
+            kind="qubit",
+            signal="amplitude",
+        )
+        fine_measurements.append(
+            {
+                "source_csv": str(fine_csv),
+                "coarse_center_mhz": float(coarse_candidate.center_mhz),
+                "prior_window": [float(fine_axis[0]), float(fine_axis[-1])],
+                "scan_window": [float(fine_axis[0]), float(fine_axis[-1])],
+                "points": int(fine_axis.size),
+            }
+        )
+        extracted = extract_candidates(fine_fit)
+        real = [candidate for candidate in extracted if not candidate.is_null]
+        if real:
+            selected = min(
+                real,
+                key=lambda candidate: abs(
+                    float(candidate.center_mhz) - float(coarse_candidate.center_mhz)
+                ),
+            )
+            fine_candidates.append(selected)
+        if null_candidate is None:
+            null_candidate = next(
+                (candidate for candidate in extracted if candidate.is_null),
+                None,
+            )
+        fine_assessments.append(
+            assess_coverage(
+                extracted,
+                prior_window=(float(fine_axis[0]), float(fine_axis[-1])),
+                scan_window=(float(fine_axis[0]), float(fine_axis[-1])),
+                points=int(fine_axis.size),
+                expected_fwhm_mhz=float(fine_fit.parameters["fwhm_mhz"]),
+                expected_contrast=abs(float(fine_fit.parameters["amplitude"])),
+            )
+        )
+    if not fine_candidates or null_candidate is None:
+        return NodeOutcome(
+            "retake",
+            "no fine spectroscopy candidate could be extracted",
+            {},
+            last_csv=str(coarse_csv),
+            classification={
+                "failure_class": "A",
+                "coverage_reasons": ("detectability",),
+                "candidate_count": 0,
+                "proposed_remediation": "averaging",
+            },
+        )
+    fine_candidates.sort(key=lambda candidate: abs(float(candidate.contrast)), reverse=True)
+    deduplicated = []
+    for candidate in fine_candidates:
+        if any(
+            abs(float(candidate.center_mhz) - float(existing.center_mhz))
+            <= 0.5 * max(abs(float(candidate.fwhm_mhz)), abs(float(existing.fwhm_mhz)))
+            for existing in deduplicated
+        ):
+            continue
+        deduplicated.append(candidate)
+    ranked = tuple(
+        replace(candidate, rank=index)
+        for index, candidate in enumerate(deduplicated)
+    )
+    candidates = ranked + (replace(null_candidate, rank=len(ranked)),)
+    prior_low, prior_high = sorted(active_prior)
+    scan_low, scan_high = float(coarse_axis[0]), float(coarse_axis[-1])
+    prior_coverage = max(
+        0.0,
+        min(prior_high, scan_high) - max(prior_low, scan_low),
+    ) / max(prior_high - prior_low, np.finfo(float).eps)
+    reasons = set()
+    if prior_coverage < 0.9:
+        reasons.add("prior_coverage")
+    for assessment in fine_assessments:
+        reasons.update(assessment.reasons)
+    coverage = CoverageAssessment(
+        sufficient=not reasons,
+        reasons=tuple(sorted(reasons)),
+        prior_coverage=float(prior_coverage),
+        points_per_fwhm=float(
+            min(item.points_per_fwhm for item in fine_assessments)
+        ),
+        detectable_contrast=float(
+            max(item.detectable_contrast for item in fine_assessments)
+        ),
+        edge_margin_fwhm=float(
+            min(item.edge_margin_fwhm for item in fine_assessments)
+        ),
+    )
+    device_context = _n5_hp_device_context(ctx, candidates)
+
+    probe_files = {}
+
+    def probe_runner(
+        _engine_context: Any,
+        probe: Any,
+        probe_candidate: Any,
+        runs: Tuple[Mapping[str, Any], ...],
+    ) -> Mapping[str, float]:
+        if probe.probe_id == "flux_nudge":
+            paths = _acquire_flux_probe(
+                ctx,
+                node_id=spec.node_id,
+                probe=probe,
+                runs=tuple(runs),
+            )
+        else:
+            acquired = []
+            for run_overrides in runs:
+                overrides = dict(run_overrides)
+                averaging_name = (
+                    "soft_avg"
+                    if probe.probe_id == "drive_power_ladder"
+                    else "hard_avg"
+                )
+                overrides[averaging_name] = _averaging_value(
+                    ctx,
+                    probe.preset,
+                    attempt,
+                    name=averaging_name,
+                )
+                _run, _plan, path = _acquire(
+                    ctx,
+                    node_id=spec.node_id,
+                    experiment=probe.experiment,
+                    preset=probe.preset,
+                    overrides=overrides,
+                )
+                acquired.append(path)
+            paths = tuple(acquired)
+        probe_files.setdefault(probe_candidate.candidate_id, {})[
+            probe.probe_id
+        ] = tuple(str(path) for path in paths)
+        return probe.extract_response(paths)
+
+    engine_context = {
+        **device_context,
+        "coverage": coverage,
+        "device_context": device_context,
+        "margin_threshold": float(ctx.policy.margin_threshold),
+        "probe_budget_seconds": float(ctx.policy.probe_budget_seconds),
+        "top_k_candidates": int(ctx.policy.top_k_candidates),
+        "candidate_prominence_ratio": float(
+            ctx.policy.candidate_prominence_ratio
+        ),
+        "probe_runner": probe_runner,
+    }
+    hypotheses_in_play = hypothesis_ids("qubit")
+    predictions = (
+        "rabi_gain_linearity",
+        "flux_period_agreement",
+        "dispersive_shift",
+    )
+    hp_spec = HypothesisNodeSpec(
+        node_id=spec.node_id,
+        acquire=lambda _context, _attempt: Path(ranked[0].source_csv),
+        extract=lambda _path: candidates,
+        hypotheses=hypotheses_in_play,
+        wanted="qubit_01",
+        probes=(
+            "drive_power_ladder",
+            "flux_nudge",
+            "dispersive_response",
+            "rabi_ping",
+        ),
+        predictions=predictions,
+        product_address="defaults.q_freq",
+    )
+    result = run_hypothesis(hp_spec, engine_context, attempt=attempt)
+    coverage_inputs = {
+        "active_prior": [float(active_prior[0]), float(active_prior[1])],
+        "coarse_scan_window": [
+            float(coarse_axis[0]),
+            float(coarse_axis[-1]),
+        ],
+        "minimum_prior_coverage": 0.9,
+        "fine_measurements": fine_measurements,
+    }
+    _persist_hypothesis_result(
+        ctx,
+        result,
+        product_address="defaults.q_freq",
+        device_context=device_context,
+        coverage_inputs=coverage_inputs,
+        probe_files=probe_files,
+        hypothesis_ids_in_play=tuple(hypotheses_in_play),
+        predictions=predictions,
+    )
+    classification = {
+        "failure_class": result.adjudication.failure_class,
+        "candidate_count": len(ranked),
+        "coverage_reasons": tuple(result.coverage.reasons),
+        "hypothesis": result.adjudication.hypothesis_id,
+        "hypothesis_margin": float(result.adjudication.margin),
+        "probes_run": tuple(result.probes_run),
+        "proposed_remediation": (
+            "averaging"
+            if result.adjudication.action == "remediate"
+            else None
+        ),
+    }
+    if result.adjudication.action == "consult":
+        flattened_responses = tuple(
+            {
+                "candidate_id": candidate_id,
+                "probe_id": probe_id,
+                **dict(response),
+            }
+            for candidate_id, by_probe in result.responses.items()
+            for probe_id, response in by_probe.items()
+        )
+        advisor_response = consult_advisor(
+            ctx,
+            trigger=(
+                "signature_mismatch"
+                if result.adjudication.hypothesis_id == "novel"
+                else "unresolved_scorecard"
+            ),
+            node_id=spec.node_id,
+            candidates=tuple(
+                _candidate_payload(candidate) for candidate in result.candidates
+            ),
+            probe_responses=flattened_responses,
+            scorecard=result.scorecard.as_dict(),
+            device_context=device_context,
+            images=_hypothesis_overlay(ctx, result),
+        )
+        classification["advisor_hypothesis"] = (
+            advisor_response.hypothesis_label
+        )
+        classification["advisor_action"] = to_builtin(
+            advisor_response.proposed_action
+        )
+    if result.adjudication.action == "remediate":
+        return NodeOutcome(
+            "retake",
+            result.adjudication.reason,
+            {},
+            last_csv=str(result.source_csv),
+            classification=classification,
+        )
+    if result.adjudication.action == "derive_and_retry":
+        leader = next(
+            candidate
+            for candidate in candidates
+            if candidate.candidate_id == result.adjudication.candidate_id
+        )
+        if result.adjudication.hypothesis_id == "f02_two_photon":
+            derived = float(leader.center_mhz) - q_delta_mhz / 2.0
+            ctx.session.set_working_values(
+                {"session.n5_hp_derived_center_mhz": derived}
+            )
+            return NodeOutcome(
+                "retake",
+                "derived qubit_01 frequency from the f02 two-photon response",
+                {"session.n5_hp_derived_center_mhz": derived},
+                last_csv=str(result.source_csv),
+                classification=classification,
+            )
+    if result.adjudication.action != "accept":
+        return NodeOutcome(
+            "blocked",
+            result.adjudication.reason,
+            {},
+            last_csv=str(result.source_csv),
+            classification=classification,
+        )
+    leader = next(
+        candidate
+        for candidate in candidates
+        if candidate.candidate_id == result.adjudication.candidate_id
+    )
+    accepted_fit = fit_spectroscopy_features(
+        leader.source_csv,
+        kind="qubit",
+        signal="amplitude",
+        window_mhz=leader.window_mhz,
+    )
+    gates = {
+        "coverage_sufficient": _gate(True, "true", True),
+        "wanted_hypothesis": _gate(
+            result.adjudication.hypothesis_id,
+            "qubit_01",
+            result.adjudication.hypothesis_id == "qubit_01",
+        ),
+        "hypothesis_margin": _gate(
+            result.adjudication.margin,
+            ">= hardware.autocal.hypothesis.margin_threshold",
+            result.adjudication.margin >= ctx.policy.margin_threshold,
+        ),
+    }
+    _fit_event(
+        ctx,
+        spec.node_id,
+        csv_path=Path(leader.source_csv),
+        gates=gates,
+        passed=True,
+        reason="qubit identity accepted by perturbation-response margin",
+    )
+    proposals, values = _propose(
+        ctx,
+        node_id=spec.node_id,
+        records={
+            "defaults.q_freq": _spectroscopy_record(accepted_fit, ctx.z_gain)
+        },
+        gates_pass=True,
+        gate_table=gates,
+    )
+    return NodeOutcome(
+        "done",
+        "qubit frequency accepted by hypothesis margin",
+        values,
+        proposals,
+        str(leader.source_csv),
+        gates,
+        classification,
     )
 
 
@@ -1373,6 +2755,7 @@ def _n8(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
         preset="rabi_length",
         overrides={
             "q_freq": float(ctx.working_value("defaults.q_freq", 5606.5)),
+            "q_gain": float(ctx.working_value("defaults.q_gain", 0.4)),
             "q_length": np.linspace(0.02, 1.67, 34),
             "hard_avg": _averaging_value(
                 ctx,
@@ -1489,6 +2872,45 @@ def _n9(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
         gates_pass=True,
         gate_table=gates,
     )
+    if "discrepancy_ledger" in ctx.session.state:
+        from math import erf, sqrt
+
+        from .hp.ledger import DiscrepancyLedger, render_discrepancy_report
+
+        direction = np.asarray(fit.means[1] - fit.means[0], dtype=float)
+        separation = float(np.linalg.norm(direction))
+        unit = direction / max(separation, np.finfo(float).eps)
+        variances = [
+            float(unit @ covariance @ unit)
+            for covariance in np.asarray(fit.covariances, dtype=float)
+        ]
+        pooled_sigma = sqrt(
+            max(0.5 * sum(variances), np.finfo(float).eps)
+        )
+        discriminability = separation / pooled_sigma
+        predicted_fidelity = 0.5 * (
+            1.0 + erf(discriminability / (2.0 * sqrt(2.0)))
+        )
+        ledger = DiscrepancyLedger.from_dict(
+            ctx.session.state.get("discrepancy_ledger", {})
+        )
+        ledger.record(
+            "readout_fidelity_vs_snr",
+            predicted_fidelity,
+            float(fit.assignment_fidelity),
+            max(
+                float(fit.fidelity_uncertainty),
+                1.0 / sqrt(max(2 * fit.shots_per_state, 1)),
+            ),
+            ("two equal-prior Gaussian readout clouds",),
+            (spec.node_id,),
+        )
+        ctx.session.state["discrepancy_ledger"] = ledger.as_dict()
+        ctx.session.save()
+        (ctx.session.directory / "discrepancy-report.md").write_text(
+            render_discrepancy_report(ledger),
+            encoding="utf-8",
+        )
     return NodeOutcome("done", "IQ threshold and fidelity fitted", values, proposals, str(csv_path), gates)
 
 
@@ -1773,6 +3195,8 @@ def run_node(
     attempt: int,
 ) -> NodeOutcome:
     """Execute one node attempt through its registered launcher-grade path."""
+    if spec.node_id == "N5" and ctx.policy.hypothesis_enabled("N5"):
+        return _n5_hypothesis(ctx, spec, int(attempt))
     handler = _HANDLERS.get(spec.node_id)
     if handler is None:
         return NodeOutcome(

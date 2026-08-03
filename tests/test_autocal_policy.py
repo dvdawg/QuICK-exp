@@ -114,6 +114,16 @@ def test_policy_caps_clamp_not_reject():
     assert clamped["q_freq"] == 5600.0
 
 
+def test_hypothesis_adaptive_and_backtracking_policy_defaults_are_safe():
+    policy = load_autocal_policy(_repository().hardware)
+    assert policy.hypothesis_nodes == frozenset()
+    assert policy.adaptive_nodes == frozenset()
+    assert policy.margin_threshold > 0.0
+    assert policy.probe_budget_seconds > 0.0
+    assert policy.max_backtracks_per_address <= policy.max_backtracks_per_session
+    assert policy.advisor_mode == "null"
+
+
 def test_missing_hardware_policy_is_proposal_only_at_every_level():
     repository = _repository()
     hardware = deepcopy(repository.hardware)
@@ -179,6 +189,31 @@ def test_mandatory_hard_stops_cannot_be_removed_from_policy():
         (
             {"caps": {"r_power_max_db": -100}},
             "r_power_max_db is outside",
+        ),
+        (
+            {"hypothesis_nodes": "N5"},
+            "hypothesis_nodes must be a list",
+        ),
+        (
+            {"hypothesis_nodes": ["N4"]},
+            "unsupported node ids",
+        ),
+        (
+            {"adaptive_nodes": ["N5"]},
+            "unsupported node ids",
+        ),
+        (
+            {"hypothesis": {"margin_threshold": 0}},
+            "margin_threshold must be positive",
+        ),
+        (
+            {"backtracking": {"max_backtracks_per_address": 4,
+                               "max_backtracks_per_session": 3}},
+            "per-address cap cannot exceed",
+        ),
+        (
+            {"advisor": {"mode": "mystery"}},
+            "advisor.mode must be",
         ),
     ),
 )

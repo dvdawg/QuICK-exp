@@ -1,11 +1,23 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
+import yaml
 
 from quickexp_v3.backend import SyntheticBackend
 from quickexp_v3.experiments.base import ExperimentPlan
 from quickexp_v3.synthetic_device import DeviceModel, SpuriousFeature
 from quickexp_v3.zoo import DEFECT_CLASSES, ZooChip, generate_chip, generate_zoo
 from tools.zoo_metrics import DecisionResult, score_results
+from tools.baseline_hypothesis import calibrate_margin_threshold
+from tools.archived_trace_regression import (
+    load_manifest,
+    verify_archived_traces,
+)
+from tools.baseline_legacy import acquire_qubit_trace
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _qubit_plan(frequency, q_gain=0.1, z_gain=0.0):
@@ -308,3 +320,80 @@ def test_wrong_value_propagation_and_time_are_reported():
     metrics = score_results((result,), chips, tolerance_mhz=1.0)
     assert metrics["overall"]["wrong_value_propagation_rate"] == 1.0
     assert metrics["overall"]["median_time_to_calibration_seconds"] == 12.5
+
+
+def test_margin_calibration_selects_first_zero_false_accept_cutoff():
+    chips = (
+        generate_chip("clean", seed=1),
+        generate_chip("f02_shadow", seed=2),
+    )
+    results = (
+        DecisionResult(
+            chips[0].chip_id,
+            chips[0].defect_class,
+            "accept",
+            chips[0].truth["q_freq_mhz"],
+            hypothesis_margin=2.5,
+            hypothesis_id="qubit_01",
+        ),
+        DecisionResult(
+            chips[1].chip_id,
+            chips[1].defect_class,
+            "accept",
+            chips[1].truth["q_freq_mhz"] + 90.0,
+            hypothesis_margin=1.0,
+            hypothesis_id="qubit_01",
+        ),
+    )
+    threshold = calibrate_margin_threshold(results, chips)
+    assert threshold > 1.0
+    assert threshold <= 2.5
+
+
+def test_margin_calibration_never_claims_a_cutoff_below_the_executed_run():
+    chip = generate_chip("clean", seed=1)
+    result = DecisionResult(
+        chip.chip_id,
+        chip.defect_class,
+        "accept",
+        chip.truth["q_freq_mhz"],
+        hypothesis_margin=3.0,
+        hypothesis_id="qubit_01",
+    )
+    threshold = calibrate_margin_threshold(
+        (result,),
+        (chip,),
+        minimum_validated_threshold=2.0,
+    )
+    assert threshold == 2.0
+
+
+def test_archived_trace_manifest_rechecks_labeled_candidate(tmp_path):
+    chip = generate_chip("clean", seed=1)
+    csv_path = acquire_qubit_trace(chip, tmp_path)
+    manifest = tmp_path / "manifest.yml"
+    manifest.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "traces": [
+                    {
+                        "csv": csv_path.name,
+                        "correct_value": chip.truth["q_freq_mhz"],
+                        "correct_hypothesis": "qubit_01",
+                        "notes": "synthetic schema test",
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    result = verify_archived_traces(manifest)[0]
+    assert result.correct_hypothesis == "qubit_01"
+    assert result.identity_replayed is False
+
+
+def test_repository_manifest_stays_explicitly_unlabeled():
+    manifest = ROOT / "tests" / "fixtures" / "labeled" / "manifest.yml"
+    assert load_manifest(manifest) == ()

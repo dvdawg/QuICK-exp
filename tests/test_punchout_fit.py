@@ -13,11 +13,20 @@ REAL_SOURCE = Path(
 )
 
 
-def _write_punchout(path, powers, frequencies, centers, noise=0.0):
+def _write_punchout(
+    path,
+    powers,
+    frequencies,
+    centers,
+    noise=0.0,
+    polarity=-1.0,
+):
     rng = np.random.default_rng(2)
     rows = []
     for power, center in zip(powers, centers):
-        amplitude = -12.0 / (1.0 + ((frequencies - center) / 0.25) ** 2)
+        amplitude = polarity * 12.0 / (
+            1.0 + ((frequencies - center) / 0.25) ** 2
+        )
         amplitude += rng.normal(0.0, noise, frequencies.size)
         iq = 10 ** (amplitude / 20.0)
         rows.append(
@@ -56,24 +65,44 @@ def _write_punchout(path, powers, frequencies, centers, noise=0.0):
     )
 
 
-def test_punchout_resolves_synthetic_and_rejects_coarse_grid(tmp_path):
+@pytest.mark.parametrize(
+    ("polarity", "expected_polarity"),
+    [(-1.0, "dip"), (1.0, "peak")],
+)
+def test_punchout_resolves_synthetic_and_rejects_coarse_grid(
+    tmp_path,
+    polarity,
+    expected_polarity,
+):
     powers = np.linspace(-40.0, -5.0, 12)
     frequencies = np.arange(6881.0, 6887.01, 0.1)
     centers = punchout_model(powers, 6884.0, 1.2, -20.0, 4.0)
-    source = tmp_path / "resolved.csv"
-    _write_punchout(source, powers, frequencies, centers)
+    source = tmp_path / f"resolved_{expected_polarity}.csv"
+    _write_punchout(
+        source,
+        powers,
+        frequencies,
+        centers,
+        polarity=polarity,
+    )
     fit = fit_punchout(source)
     assert fit.status == "resolved"
+    assert fit.feature_polarity == expected_polarity
     assert fit.parameters["punchout_shift_mhz"] == pytest.approx(1.2, rel=0.15)
     assert fit.parameters["transition_power_db"] == pytest.approx(-20.0, rel=0.15)
 
     coarse_frequency = np.arange(6880.0, 6889.0, 1.2)
-    coarse = tmp_path / "coarse.csv"
-    _write_punchout(coarse, powers, coarse_frequency, centers)
+    coarse = tmp_path / f"coarse_{expected_polarity}.csv"
+    _write_punchout(
+        coarse,
+        powers,
+        coarse_frequency,
+        centers,
+        polarity=polarity,
+    )
     assert fit_punchout(coarse).status == "unresolved"
 
 
 @pytest.mark.skipif(not REAL_SOURCE.exists(), reason="local real-data mirror absent")
 def test_real_coarse_punchout_reports_unresolved():
     assert fit_punchout(REAL_SOURCE).status == "unresolved"
-

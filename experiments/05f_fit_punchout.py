@@ -22,6 +22,8 @@ from quickexp_v3.punchout_fit import (
 LIVE_HARDWARE = False
 INPUT_CSV = None
 SMOOTH_SIGMA_BINS = 1.5
+# "auto" chooses the stronger map-wide polarity; "dip"/"peak" override it.
+FEATURE_POLARITY = "auto"
 PRIOR_LINEWIDTH_MHZ = 2.0
 MINIMUM_PLATEAU_ROWS = 2
 MINIMUM_SHIFT_OVER_STEP = 2.0
@@ -50,8 +52,10 @@ def main():
         _input_path(),
         smooth_sigma_bins=SMOOTH_SIGMA_BINS,
         prior_linewidth_mhz=PRIOR_LINEWIDTH_MHZ,
+        feature_polarity=FEATURE_POLARITY,
     )
     print(f"Fit source: {fit.source_csv}")
+    print(f"Detected feature polarity: {fit.feature_polarity}")
     print(f"Punchout verdict: {fit.status}")
     if fit.status == "resolved":
         print(

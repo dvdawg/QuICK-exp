@@ -15,7 +15,7 @@ from .errors import AnalysisError
 from .fit_calibration import annotate_forced_write, write_calibration_records
 from .fit_stats import pinned_parameters, r_squared
 from .native_map import NativeMap, load_native_map
-from .resonator_flux import extract_notch_centers
+from .resonator_flux import extract_feature_centers
 from .trace_qc import qc_map
 from .util import utc_now
 
@@ -47,6 +47,7 @@ class PunchoutFit:
     statistics: Mapping[str, Any]
     recommendation: Mapping[str, Any]
     metadata: Mapping[str, Any]
+    feature_polarity: str = "unknown"
 
     def passes(
         self,
@@ -80,16 +81,18 @@ def fit_punchout(
     *,
     smooth_sigma_bins: float = 1.5,
     prior_linewidth_mhz: Optional[float] = None,
+    feature_polarity: str = "auto",
 ) -> PunchoutFit:
     native = load_native_map(csv_path)
     powers, frequencies, amplitude = _power_frequency_map(native)
     order = np.argsort(powers)
     powers = np.asarray(powers[order], dtype=float)
     amplitude = np.asarray(amplitude[order], dtype=float)
-    centers, depths, _ = extract_notch_centers(
+    centers, contrasts, _, selected_polarity = extract_feature_centers(
         np.asarray(frequencies, dtype=float),
         amplitude,
         smooth_sigma_bins,
+        feature_polarity=feature_polarity,
     )
     frequency_step = float(np.median(np.diff(frequencies)))
     observed_shift = float(
@@ -111,7 +114,9 @@ def fit_punchout(
         "observed_shift_mhz": observed_shift,
         "shift_over_frequency_step": float(shift_over_step),
         "frequency_step_mhz": frequency_step,
-        "notch_depth_minimum": float(np.min(depths)),
+        "feature_contrast_minimum": float(np.min(contrasts)),
+        # Backward-compatible alias retained for older reports.
+        "notch_depth_minimum": float(np.min(contrasts)),
         "qc": {
             str(power): quality.as_dict()
             for power, quality in qc_map(native).items()
@@ -121,6 +126,7 @@ def fit_punchout(
         return PunchoutFit(
             source_csv=native.source_csv,
             status="unresolved",
+            feature_polarity=selected_polarity,
             powers_db=powers,
             frequencies_mhz=np.asarray(frequencies),
             amplitude=amplitude,
@@ -228,6 +234,7 @@ def fit_punchout(
     return PunchoutFit(
         source_csv=native.source_csv,
         status="resolved",
+        feature_polarity=selected_polarity,
         powers_db=powers,
         frequencies_mhz=np.asarray(frequencies),
         amplitude=amplitude,
@@ -256,8 +263,8 @@ def plot_punchout_fit(fit: PunchoutFit):
         axes[1].plot(fit.powers_db, fit.fitted_centers_mhz, "-", label="logistic plateaus")
     axes[1].set(
         xlabel="Readout power (dB)",
-        ylabel="Notch center (MHz)",
-        title=f"Status: {fit.status}",
+        ylabel="Resonance center (MHz)",
+        title=f"Status: {fit.status}; feature: {fit.feature_polarity}",
     )
     axes[1].grid(alpha=0.3)
     axes[1].legend()
@@ -280,7 +287,10 @@ def punchout_calibration_record(fit: PunchoutFit) -> dict:
             "fitted_at": utc_now(),
             "analysis": "quickexp_v3.punchout_fit.fit_punchout",
         },
-        "quality": dict(fit.statistics),
+        "quality": {
+            **dict(fit.statistics),
+            "feature_polarity": fit.feature_polarity,
+        },
         "model": "two_plateau_logistic",
         "status": "accepted",
         "accepted_at": utc_now(),

@@ -285,6 +285,12 @@ def _validate_autocal_policy(
         "budgets",
         "caps",
         "ramsey_sign",
+        "hypothesis_nodes",
+        "adaptive_nodes",
+        "hypothesis",
+        "backtracking",
+        "adaptive",
+        "advisor",
     }
     unknown_roots = set(value).difference(allowed_roots)
     if unknown_roots:
@@ -292,6 +298,29 @@ def _validate_autocal_policy(
             "hardware.autocal has unknown keys: "
             + ", ".join(sorted(unknown_roots))
         )
+    supported_node_migrations = {
+        "hypothesis_nodes": {"N5"},
+        "adaptive_nodes": {"N2", "N3"},
+    }
+    for name in ("hypothesis_nodes", "adaptive_nodes"):
+        nodes = value.get(name, [])
+        if (
+            not isinstance(nodes, list)
+            or any(not isinstance(item, str) or not item for item in nodes)
+        ):
+            raise ConfigError(
+                "hardware.autocal." + name + " must be a list of node ids"
+            )
+        if len(nodes) != len(set(nodes)):
+            raise ConfigError("hardware.autocal." + name + " contains duplicates")
+        unknown_nodes = set(nodes).difference(supported_node_migrations[name])
+        if unknown_nodes:
+            raise ConfigError(
+                "hardware.autocal."
+                + name
+                + " has unsupported node ids: "
+                + ", ".join(sorted(unknown_nodes))
+            )
     hard_stops = value.get("hard_stop_records", [])
     if (
         not isinstance(hard_stops, list)
@@ -436,6 +465,121 @@ def _validate_autocal_policy(
             "hardware.autocal.ramsey_sign.require_two_point_confirmation "
             "must be boolean"
         )
+
+    hypothesis = value.get("hypothesis", {})
+    if not isinstance(hypothesis, Mapping):
+        raise ConfigError("hardware.autocal.hypothesis must be a mapping")
+    allowed_hypothesis = {
+        "margin_threshold",
+        "probe_budget_seconds",
+        "top_k_candidates",
+        "candidate_prominence_ratio",
+    }
+    if set(hypothesis).difference(allowed_hypothesis):
+        raise ConfigError("hardware.autocal.hypothesis has unknown keys")
+    for name in ("margin_threshold", "probe_budget_seconds"):
+        if name in hypothesis and _finite_number(
+            hypothesis[name], "hardware.autocal.hypothesis." + name
+        ) <= 0:
+            raise ConfigError(
+                "hardware.autocal.hypothesis." + name + " must be positive"
+            )
+    if "top_k_candidates" in hypothesis:
+        top_k = _finite_number(
+            hypothesis["top_k_candidates"],
+            "hardware.autocal.hypothesis.top_k_candidates",
+        )
+        if top_k <= 0 or not top_k.is_integer():
+            raise ConfigError(
+                "hardware.autocal.hypothesis.top_k_candidates must be a positive integer"
+            )
+    if "candidate_prominence_ratio" in hypothesis:
+        ratio = _finite_number(
+            hypothesis["candidate_prominence_ratio"],
+            "hardware.autocal.hypothesis.candidate_prominence_ratio",
+        )
+        if not 0.0 <= ratio <= 1.0:
+            raise ConfigError(
+                "hardware.autocal.hypothesis.candidate_prominence_ratio must be between 0 and 1"
+            )
+
+    backtracking = value.get("backtracking", {})
+    if not isinstance(backtracking, Mapping):
+        raise ConfigError("hardware.autocal.backtracking must be a mapping")
+    allowed_backtracking = {
+        "max_backtracks_per_session",
+        "max_backtracks_per_address",
+    }
+    if set(backtracking).difference(allowed_backtracking):
+        raise ConfigError("hardware.autocal.backtracking has unknown keys")
+    backtrack_values = {}
+    for name, default in (
+        ("max_backtracks_per_session", 3),
+        ("max_backtracks_per_address", 2),
+    ):
+        amount = _finite_number(
+            backtracking.get(name, default),
+            "hardware.autocal.backtracking." + name,
+        )
+        if amount < 0 or not amount.is_integer():
+            raise ConfigError(
+                "hardware.autocal.backtracking." + name
+                + " must be a non-negative integer"
+            )
+        backtrack_values[name] = int(amount)
+    if (
+        backtrack_values["max_backtracks_per_address"]
+        > backtrack_values["max_backtracks_per_session"]
+    ):
+        raise ConfigError("autocal backtracking per-address cap cannot exceed session cap")
+
+    adaptive = value.get("adaptive", {})
+    if not isinstance(adaptive, Mapping):
+        raise ConfigError("hardware.autocal.adaptive must be a mapping")
+    allowed_adaptive = {"initial_rows", "max_rows", "abort_after_rows"}
+    if set(adaptive).difference(allowed_adaptive):
+        raise ConfigError("hardware.autocal.adaptive has unknown keys")
+    adaptive_values = {}
+    for name, default in (
+        ("initial_rows", 5),
+        ("max_rows", 7),
+        ("abort_after_rows", 5),
+    ):
+        amount = _finite_number(
+            adaptive.get(name, default),
+            "hardware.autocal.adaptive." + name,
+        )
+        if amount < 3 or not amount.is_integer():
+            raise ConfigError(
+                "hardware.autocal.adaptive." + name
+                + " must be an integer of at least 3"
+            )
+        adaptive_values[name] = int(amount)
+    if adaptive_values["initial_rows"] > adaptive_values["max_rows"]:
+        raise ConfigError("autocal adaptive initial_rows cannot exceed max_rows")
+    if adaptive_values["abort_after_rows"] > adaptive_values["max_rows"]:
+        raise ConfigError("autocal adaptive abort_after_rows cannot exceed max_rows")
+
+    advisor = value.get("advisor", {})
+    if not isinstance(advisor, Mapping):
+        raise ConfigError("hardware.autocal.advisor must be a mapping")
+    allowed_advisor = {"mode", "model", "timeout_seconds"}
+    if set(advisor).difference(allowed_advisor):
+        raise ConfigError("hardware.autocal.advisor has unknown keys")
+    mode = advisor.get("mode", "null")
+    if mode not in {"null", "replay", "claude"}:
+        raise ConfigError(
+            "hardware.autocal.advisor.mode must be null, replay, or claude"
+        )
+    model = advisor.get("model", "claude-sonnet-5")
+    if not isinstance(model, str) or not model.strip():
+        raise ConfigError("hardware.autocal.advisor.model must be a non-empty string")
+    timeout = _finite_number(
+        advisor.get("timeout_seconds", 60.0),
+        "hardware.autocal.advisor.timeout_seconds",
+    )
+    if timeout <= 0:
+        raise ConfigError("hardware.autocal.advisor.timeout_seconds must be positive")
 
 
 def _validate_limits(parameters: Mapping[str, Any], limits: Mapping[str, Any]) -> None:
