@@ -54,6 +54,10 @@ python -m pytest -q
 | `13a_ramsey.py`                            | Ramsey dephasing                                                          |
 | `14_echo.py`                               | Hahn echo / fixed-cycle CPMG                                              |
 | `16_two_photon_spectroscopy.py`            | high-power two-photon search                                              |
+| `17a_flux_step_spectroscopy.py`            | adaptive long-time flux-step spectroscopy                                |
+| `17b_fit_flux_iir.py`                      | fit/export the candidate matched-z inverse IIR                            |
+| `17c_cryoscope.py`                         | short-time Ramsey cryoscope acquisition                                  |
+| `17d_fit_flux_fir.py`                      | fit/export regularized forward and inverse FIR filters                    |
 | `90_measurement_queue.py`                  | run selected numbered files sequentially                                  |
 | `91_autocal.py`                            | run/resume a policy-governed calibration target                           |
 | `92_review_proposals.py`                   | inspect, promote, or reject inert proposals                               |
@@ -62,6 +66,12 @@ python -m pytest -q
 
 The order is a suggested workflow. Adapt it to the device, firmware, and
 calibration state in use.
+
+The flux-line sequence is an implementation of Hellings *et al.*, Phys. Rev.
+Research 7, 043142 (2025). Its exact paper settings, in-lab safety gates,
+iteration order, efficient variants, hardware-upload boundary, and validation
+holdouts are in
+[docs/FLUX_COMPENSATION.md](docs/FLUX_COMPENSATION.md).
 
 ## Measurement queue
 

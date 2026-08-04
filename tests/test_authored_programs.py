@@ -12,7 +12,12 @@ from quickexp_v3.config import ConfigRepository
 from quickexp_v3.errors import ConfigError
 from quickexp_v3.experiments.registry import get
 from quickexp_v3.lab import install_authored_programs
-from quickexp_v3.programs import T1_ZPA, TWO_TONE_ZPA
+from quickexp_v3.programs import (
+    CRYOSCOPE,
+    FLUX_STEP_SPECTROSCOPY,
+    T1_ZPA,
+    TWO_TONE_ZPA,
+)
 from quickexp_v3.synthetic_device import DeviceModel
 from quickexp_v3.backend import SyntheticBackend
 
@@ -64,6 +69,21 @@ def test_authored_program_plans_preflight_and_decode_synthetic_maps():
     t1_data = t1.decode(t1_plan, backend.acquire(t1_plan))
     assert t1_data.points == 9 * 61
 
+    step = get("flux_step_spectroscopy")
+    step_plan = step.build(repo.resolve("flux_step_spectroscopy"))
+    assert FLUX_STEP_SPECTROSCOPY.preflight(soccfg(), step_plan.variables).ok
+    step_data = step.decode(step_plan, backend.acquire(step_plan))
+    assert step_data.points == 13 * 201
+
+    cryoscope = get("cryoscope")
+    cryoscope_plan = cryoscope.build(repo.resolve("cryoscope"))
+    assert CRYOSCOPE.preflight(soccfg(), cryoscope_plan.variables).ok
+    cryoscope_data = cryoscope.decode(
+        cryoscope_plan,
+        backend.acquire(cryoscope_plan),
+    )
+    assert cryoscope_data.points == 43 * 16
+
 
 def test_program_registration_rejects_config_override_collisions():
     with pytest.raises(ConfigError, match="collide.*rep"):
@@ -90,7 +110,12 @@ def test_install_all_authored_programs_is_idempotent():
     )
     second = install_authored_programs(quick)
 
-    assert set(first) == {"TwoTone_ZPA", "T1_zpa"}
+    assert set(first) == {
+        "Cryoscope",
+        "FluxStepSpectroscopy",
+        "TwoTone_ZPA",
+        "T1_zpa",
+    }
     assert first == second
     instance = first["TwoTone_ZPA"]()
     assert instance.var["r"] == 4

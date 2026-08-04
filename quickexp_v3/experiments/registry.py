@@ -6,8 +6,10 @@ from typing import Dict
 
 from ..errors import ExperimentError
 from .base import Experiment
+from .cryoscope import EXPERIMENT as cryoscope
 from .dispersive_spectroscopy import EXPERIMENT as dispersive_spectroscopy
 from .echo import EXPERIMENT as echo
+from .flux_step_spectroscopy import EXPERIMENT as flux_step_spectroscopy
 from .iq_blobs import EXPERIMENT as iq_blobs
 from .loopback import EXPERIMENT as loopback
 from .qubit_spectroscopy import EXPERIMENT as qubit_spectroscopy
@@ -37,6 +39,8 @@ EXPERIMENTS: Dict[str, Experiment] = {
         echo,
         two_tone_zpa,
         t1_zpa,
+        flux_step_spectroscopy,
+        cryoscope,
     )
 }
 

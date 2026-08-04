@@ -418,6 +418,22 @@ def test_every_numbered_file_runs_to_completion_offline(tmp_path):
                 module_globals["WRITE_ACCEPTED_FIT"] = False
         if filename == "14b_fit_echo.py":
             module_globals["BOOTSTRAP_RESAMPLES"] = 10
+        if filename == "17b_fit_flux_iir.py":
+            module_globals["USE_SYNTHETIC_DEMO"] = True
+            module_globals["WRITE_CANDIDATE"] = False
+            module_globals["MODEL_ORDERS"] = (1, 2, 3, 4)
+            module_globals["MULTISTARTS"] = 3
+        if filename == "17c_cryoscope.py":
+            module_globals["SCHEDULE_JSON"] = (
+                tmp_path / "analysis_cache/cryoscope_schedule.json"
+            )
+            module_globals["HARD_AVG"] = 32
+        if filename == "17d_fit_flux_fir.py":
+            module_globals["USE_SYNTHETIC_DEMO"] = True
+            module_globals["WRITE_CANDIDATE"] = False
+            module_globals["FIR_COEFFICIENT_COUNT"] = 12
+            module_globals["INVERSE_FIR_LENGTH"] = 12
+            module_globals["MAXIMUM_EVALUATIONS"] = 200
         if filename == "05d_fit_resonator_vs_flux.py":
             scan_path = tmp_path / "00001 - ResVsZ_held_bias.csv"
             write_flux_scan(scan_path)
@@ -431,6 +447,10 @@ def test_every_numbered_file_runs_to_completion_offline(tmp_path):
         for name, value in list(module_globals.items()):
             if isinstance(value, np.ndarray) and value.ndim == 1 and value.size > 3:
                 module_globals[name] = value[:3]
+        if filename == "17c_cryoscope.py":
+            module_globals["RAMSEY_PHASE_DEG"] = np.asarray(
+                [0.0, 90.0, 180.0, 270.0]
+            )
 
         result = namespace["main"]()
         if filename == "00_connect_and_ports.py":
@@ -453,6 +473,11 @@ def test_every_numbered_file_runs_to_completion_offline(tmp_path):
             assert result.statistics["r_squared"] > 0.95
         elif filename in extended_fit_fixtures:
             assert result is not None
+        elif filename == "17b_fit_flux_iir.py":
+            assert result.model_order == 3
+            assert result.statistics["r_squared"] > 0.999
+        elif filename == "17d_fit_flux_fir.py":
+            assert result.statistics["r_squared"] > 0.999
         elif filename == "95_device_report.py":
             assert result.markdown_path.is_file()
         elif filename == "92_review_proposals.py":

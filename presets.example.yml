@@ -121,6 +121,54 @@ presets:
     analysis:
       note: native authored-program z_gain-by-q_freq grid (q_freq inner)
 
+  flux_step_spectroscopy:
+    experiment: flux_step_spectroscopy
+    parameters:
+      probe_time: {values: [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0], unit: us}
+      q_freq: {center_from: defaults.q_freq, span: 200.0, points: 201, unit: MHz}
+      q_gain: 0.15
+      q_length: 0.04
+      z_step_gain: -0.05
+      z_return_gain: 0.0
+      z_idle_gain: 0.0
+      z_set_length: 0.004
+      post_probe_to_return: 0.07
+      return_guard: 0.11
+      r_power: -35.0
+      r_length: 2.0
+      r_relax: 300.0
+      hard_avg: 2048
+      soft_avg: 1
+      rep: 0
+    run:
+      dB: false
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      note: local-gain placeholder; 17a derives paper Phi0 fractions; frequency is inner
+
+  cryoscope:
+    experiment: cryoscope
+    parameters:
+      flux_time: {start: 0.016, stop: 0.100, points: 43, unit: us}
+      ramsey_phase: {start: 0.0, stop: 337.5, points: 16, unit: deg}
+      q_gain: 0.2
+      q_length: 0.04
+      z_gain: -0.05
+      z_sigma: 0.002
+      r_power: -35.0
+      r_length: 2.0
+      r_relax: 60.0
+      hard_avg: 4096
+      soft_avg: 1
+      rep: 1
+    run:
+      dB: false
+      population: false
+      retry: {max_attempts: 3}
+    analysis:
+      note: local-gain placeholder; 17c derives paper Phi0 fraction; phase is inner
+
   rabi_chevron_duration:
     experiment: rabi_chevron
     parameters:

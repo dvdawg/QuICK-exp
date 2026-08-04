@@ -19,8 +19,10 @@ def repository():
 
 def test_registry_has_explicit_standard_and_chevron_adapters():
     assert names() == [
+        "cryoscope",
         "dispersive_spectroscopy",
         "echo",
+        "flux_step_spectroscopy",
         "iq_blobs",
         "loopback",
         "qubit_spectroscopy",
@@ -94,3 +96,13 @@ def test_two_dimensional_sweeps_step_frequency_innermost():
 def test_flux_and_delay_maps_hold_the_bias_on_the_outer_axis():
     plan = get("t1_zpa").build(repository().resolve("t1_zpa"))
     assert plan.axes == ("z_gain", "time")
+
+
+def test_flux_compensation_maps_put_probe_axis_innermost():
+    repo = repository()
+    step = get("flux_step_spectroscopy").build(
+        repo.resolve("flux_step_spectroscopy")
+    )
+    cryoscope = get("cryoscope").build(repo.resolve("cryoscope"))
+    assert step.axes == ("probe_time", "q_freq")
+    assert cryoscope.axes == ("flux_time", "ramsey_phase")

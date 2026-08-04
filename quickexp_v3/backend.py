@@ -521,6 +521,8 @@ class SyntheticBackend:
                     f"synthetic device injected failure for {plan.name}"
                 )
         rng = np.random.default_rng(self.seed + self.calls)
+        if plan.quick_class in {"FluxStepSpectroscopy", "Cryoscope"}:
+            return self._acquire_flux_characterization(plan, rng)
         if self.device is not None:
             return self._acquire_device(plan, rng)
         axes = list(plan.axes)
@@ -612,6 +614,100 @@ class SyntheticBackend:
                 "backend": "synthetic",
                 "seed": self.seed,
                 "call": self.calls,
+            },
+        )
+
+    def _acquire_flux_characterization(self, plan: Any, rng: Any) -> BackendResult:
+        axes = list(plan.axes)
+        axis_arrays = [
+            np.asarray(plan.variables[name], dtype=float) for name in axes
+        ]
+        grids = [
+            grid.ravel()
+            for grid in np.meshgrid(*axis_arrays, indexing="ij")
+        ]
+        points = grids[0].size
+
+        def variable(name, default=0.0):
+            if name in axes:
+                return grids[axes.index(name)]
+            value = np.asarray(plan.variables.get(name, default), dtype=float)
+            if value.size != 1:
+                raise AcquisitionError(
+                    f"synthetic {plan.quick_class} variable {name} is neither "
+                    "a registered axis nor a scalar"
+                )
+            return np.full(points, float(value.ravel()[0]))
+
+        noise = 0.0025 * (
+            rng.normal(size=points) + 1j * rng.normal(size=points)
+        )
+        truth = {}
+        if plan.quick_class == "FluxStepSpectroscopy":
+            try:
+                time = variable("probe_time")
+                frequency = variable("q_freq")
+                frequency_axis = axis_arrays[axes.index("q_freq")]
+            except ValueError as error:
+                raise AcquisitionError(
+                    "synthetic flux-step acquisition needs probe_time and q_freq"
+                ) from error
+            response = (
+                0.68 * np.exp(-time / 20.0)
+                + 0.22 * np.exp(-time / 1.3)
+                + 0.10 * np.exp(-time / 0.055)
+            )
+            span = max(float(np.ptp(frequency_axis)), 1e-6)
+            center = float(np.mean(frequency_axis)) + 0.28 * span * (
+                2.0 * response - 1.0
+            )
+            linewidth = max(span / 70.0, float(np.median(np.diff(frequency_axis))))
+            detuning = 2.0 * (frequency - center) / linewidth
+            iq = 0.1 + 0.8 / (1.0 + 1j * detuning) + noise
+            truth.update(
+                {
+                    "normalized_step_response": response.tolist(),
+                    "spectroscopy_center_mhz": center.tolist(),
+                    "step_alphas": [0.68, 0.22, 0.10],
+                    "step_taus_us": [20.0, 1.3, 0.055],
+                }
+            )
+        else:
+            try:
+                duration = grids[axes.index("flux_time")]
+                phase_deg = grids[axes.index("ramsey_phase")]
+            except ValueError as error:
+                raise AcquisitionError(
+                    "synthetic cryoscope acquisition needs flux_time and ramsey_phase"
+                ) from error
+            target_detuning_mhz = -50.0
+            edge_tau_us = 0.006
+            accumulated_phase = 2.0 * np.pi * target_detuning_mhz * (
+                duration
+                - 0.12 * edge_tau_us * (1.0 - np.exp(-duration / edge_tau_us))
+            )
+            population = 0.5 + 0.42 * np.cos(
+                np.deg2rad(phase_deg) - accumulated_phase
+            )
+            iq = population * np.exp(0.27j) + noise
+            truth.update(
+                {
+                    "target_detuning_mhz": target_detuning_mhz,
+                    "accumulated_phase_rad": accumulated_phase.tolist(),
+                    "edge_tau_us": edge_tau_us,
+                }
+            )
+        columns = list(grids)
+        if bool(plan.run_options.get("population", False)):
+            columns.append(np.clip(iq.real, 0.0, 1.0))
+        columns.extend([np.abs(iq), np.angle(iq), iq.real, iq.imag])
+        return BackendResult(
+            payload=np.column_stack(columns),
+            metadata={
+                "backend": "synthetic",
+                "seed": self.seed,
+                "call": self.calls,
+                "device_model": truth,
             },
         )
 

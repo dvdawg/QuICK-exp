@@ -28,8 +28,8 @@ include = ["quickexp_v3*"]
   "hardware.example.yml",
   "calibration.example.yml",
   "presets.example.yml",
-  "ARCHITECTURE.md",
-  "AUTOCAL.md",
+  "docs/AUTOCAL.md",
+  "docs/FLUX_COMPENSATION.md",
 ]
 
 [tool.pytest.ini_options]
