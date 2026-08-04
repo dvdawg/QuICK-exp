@@ -1,8 +1,6 @@
-# QuICK-exp v3
+# QuICK-exp
 
-QuICK-exp v3 is a superconducting-qubit measurement workflow with shared YAML
-configuration, port verification, calibration precedence, recovery, and
-held-flux safety.
+QuICK-exp is a superconducting-qubit measurement workflow with shared YAML configuration, port verification, calibration precedence, recovery, and held-flux safety.
 
 ## First use
 
@@ -60,94 +58,53 @@ python -m pytest -q
 | `95_device_report.py`                      | local calibration/trend/QC report                                         |
 
 
-The order is a suggested workflow. Adapt it to the device, firmware, and
+The order is a suggested workflow. Adapt it to the device, firmware, and  
 calibration state in use.
 
-## Measurement queue
+## Fitting and Write Latches
 
-Open `90_measurement_queue.py`, list enabled files in `TASKS`, and run it.
-The default queue runs Time Rabi followed by Power Rabi. `SHOW_PLOT=False` lets
-the next task begin without waiting for a plot window to close. Each task still
-uses its own normal `main()`, Quick CSV/YML Saver, connection, flux parking, and
-cleanup. A task may override an `EDIT THESE` value without modifying the source:
+Every fitter has the same `INPUT_CSV` setting:
 
 ```python
-{
-    "file": "08a_time_rabi.py",
-    "label": "Time Rabi at alternate gain",
-    "enabled": True,
-    "settings": {"Q_GAIN": ...},  # replace with a safe value for the device
-}
+# Newest matching one-dimensional native Quick CSV/YML pair:
+INPUT_CSV = None
+
+# Or one specific run:
+INPUT_CSV = r"/path/to/data/run.csv"
 ```
 
-Duplicate files are allowed. `STOP_ON_ERROR=True` stops at the first failure;
-set it to `False` to continue and receive a `completed_with_errors` summary.
+Point to the CSV itself, not its directory. The paired YML must have the same base filename and remain beside it. Use a raw string (`r"..."`), forward slashes, or a raw UNC path:
 
-## Automated calibration
+```python
+INPUT_CSV = r"\\file-server\share\path\to\run.csv"
+```
 
-Open `91_autocal.py`, keep `LIVE_HARDWARE=False` for the first run, choose a
-target, and run it. The default L0 autonomy level always writes complete
-fit records under `calibration.yml`'s inert top-level `proposals` mapping; it
-does not replace accepted records. Each session is restartable from
-`autocal_runs/<session_id>/state.yml`, and its append-only `decisions.jsonl`
-records every acquisition, gate, retake, escalation, proposal, and promotion
-decision without copying signal arrays.
+When `INPUT_CSV = None`, two-dimensional files and files belonging to another Quick experiment class are ignored.
 
-Create `autocal_runs/STOP` to stop cleanly between acquisitions. Resume by
-putting the prior session directory name in `SESSION_NAME`, after removing the
-sentinel. Use `92_review_proposals.py` to promote or reject L0 results. L1 and
-L2 promotion remain bounded by the hardware-owned `autocal` policy;
-`defaults.r_offset`, `lookups.resonator_vs_flux`, and
-`lookups.qubit_vs_flux` are hard stops at every level.
+All write latches default to `False`. First inspect the plotted fit, residuals, uncertainty, and printed quality gates. Then set:
 
-The full synthetic cold-start graph, STOP/resume, budget exhaustion,
-failure escalation, proposal promotion, and read-only replay with native-pair
-re-fitting are covered offline. Live rollout is deliberately staged: run
-supervised L0 sessions before enabling L1. See
-[docs/AUTOCAL.md](docs/AUTOCAL.md) for the operator runbook.
+```python
+WRITE_ACCEPTED_FIT = True
+```
 
-The hardware policy can opt N5 into perturbation-based identity adjudication
-and N2/N3 into adaptive maps. These paths preserve the native acquisition and
-safety stack, keep goodness-of-fit out of the identity verdict, record bounded
-downstream backtracking, and produce a seven-prediction circuit-QED discrepancy
-report. The optional external advisor is out-of-band and never executes its
-own proposal; `mode: null` is the network-free default.
+The update is quality-gated and written atomically to `calibration.yml`; a superseded record is retained in `history`.
 
-## Resonator-versus-Z fitted readout
+Some fitting scripts have unique behaviors; for example, Ramsey always reports both possible drive-frequency corrections because a single scalar Ramsey trace does not independently determine the detuning sign. Writing `q_freq` therefore requires both:
 
-1. Run `05c_resonator_spectroscopy_vs_flux.py` to create the native Quick
-  `ResVsZ_held_bias.csv`/YML pair.
-2. Run `05d_fit_resonator_vs_flux.py` with `WRITE_ACCEPTED_FIT = False`.
-  It selects the newest matching CSV by default, extracts each notch with the
-   Gaussian-smoothing/parabolic-refinement method, fits the robust
-   cosine, and shows the map, fit, and residuals.
-   `FIT_METHOD = "fit"` keeps that behavior. If the cosine fit is unreliable,
-   use `"min"` or `"max"` to select the corresponding smoothed frequency bin
-   in every Z row and build a piecewise-linear lookup instead. Set
-   `SMOOTH_SIGMA_BINS = 0` if the extrema should come from the raw rows. A
-   sampled lookup needs only two complete Z rows and ignores the R^2/RMSE
-   gates, so `WRITE_ACCEPTED_FIT` is its only acceptance check.
-3. After checking the diagnostics and quality gates, set
-  `WRITE_ACCEPTED_FIT = True` for one run. The accepted parameters, measured Z
-   domain, quality, uncertainty, and source CSV are written atomically to
-   `calibration.yml`; the previous lookup is retained in `history`.
-4. Set the latch back to `False`. Fixed-Z launchers now use
-  `USE_ACCEPTED_RESONATOR_FLUX_FIT = True` by default. `06b` evaluates a
-   different fitted `r_freq` for every Z row. Set the option to `False` in any
-   launcher to use its explicit manual fallback.
+```python
+WRITE_ACCEPTED_FIT = True
+UPDATE_Q_FREQUENCY = True
+# Choose a sign, then verify it experimentally.
+Q_FREQUENCY_CORRECTION_SIGN = +1
+```
 
-The fit step does not create another experiment-data format. It reads Quick's
-native CSV and only updates the accepted calibration when explicitly enabled.
-Extrapolation outside the measured Z domain is rejected.
+In many cases fits will be correct but fail acceptance gates. In this case, the file will refuse to write the accepted fit until the user manually overrides this using `FORCE_WRITE`. 
 
-## Qubit spectroscopy and DAC Nyquist zones
+```
+FORCE_WRITE = True
+```
 
-One acquisition must stay wholly inside one physical DAC Nyquist zone. For this
-reason, configure `Q_NYQUIST_BOUNDARY_MHZ` for the active hardware and firmware.
-`06b_qubit_spectroscopy_vs_flux.py` selects `p1_nqz` from
-`Q_FREQUENCY_MHZ` and rejects a range that crosses the configured boundary
-instead of silently measuring the mirror image. Split a broad search into
-separate runs for each zone; the chosen zone is recorded in the run title.
+After using the write latches, it is always good practice to set them back to `FALSE` and save to avoid accidental writes.
 
 ## Configuration and data
 
@@ -181,24 +138,6 @@ use the same renderer for outer rows.
 
 Before a live run applies held Z, QuICK-exp checks Gaussian qubit-pulse memory against the connected generator's `f_fabric`, `samps_per_clk`, and `maxlen`. The check also accounts for the cumulative Gaussian envelopes used by T1, Ramsey, Echo, IQ Scatter, and Dispersive Spectroscopy.
 
-## Rabi fitting and acceptance
-
-1. Run `08a_time_rabi.py` or `08b_power_rabi.py`.
-2. Run `08c_fit_rabi.py` with `FIT_VARIABLE="q_length"` for Time Rabi or
-  `FIT_VARIABLE="q_gain"` for Power Rabi. With `INPUT_CSV=None`, it selects
-   the newest matching one-dimensional Quick CSV/YML pair and excludes chevrons.
-3. Inspect the projected-IQ fit, residuals, IQ trajectory, pi recommendation,
-  uncertainty, oscillation count, and quality gates.
-4. For one deliberate run, set `WRITE_ACCEPTED_FIT=True`. The fitted pi value
-  is written atomically to `records.defaults.q_length` or `q_gain` in
-   `calibration.yml`; any prior record is retained in `history`. Reset the latch
-   to `False` afterward.
-
-The analysis never connects to QICK and does not create another data format.
-The recommendation is phase-corrected: it uses the first fitted oscillation
-extremum opposite the extrapolated zero-pulse state, while also reporting the
-ordinary half-period for comparison.
-
 ## Live hardware behavior
 
 Logical `r`, `q`, `rr`, and `z` roles and their generator, DAC, readout, and ADC
@@ -213,7 +152,21 @@ state so an interrupted process cannot affect the next sweep. A retry resets
 the configured generators and reapplies held Z. A normal exit attempts to
 return Z to zero bias; a lost hardware link can prevent parking.
 
-RF-board programming remains disabled until its attenuation and filter settings
+RF-board programming remains disabled until its attenuation and filter settings  
 have been reviewed for the active hardware and wiring.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for implementation boundaries.
+## Using the Measurement Queue
+
+Open `90_measurement_queue.py`, list enabled files in `TASKS`, and run it. The default queue runs Time Rabi followed by Power Rabi. `SHOW_PLOT=False` lets the next task begin without waiting for a plot window to close. Each task still uses its own normal `main()`, Quick CSV/YML Saver, connection, flux parking, and cleanup. A task may override an `EDIT THESE` value without modifying the source:
+
+```python
+{
+    "file": "08a_time_rabi.py",
+    "label": "Time Rabi at alternate gain",
+    "enabled": True,
+    "settings": {"Q_GAIN": ...},  # replace with a safe value for the device
+}
+```
+
+Duplicate files are allowed. `STOP_ON_ERROR=True` stops at the first failure;  
+set it to `False` to continue and receive a `completed_with_errors` summary.
