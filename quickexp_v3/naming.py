@@ -1,4 +1,4 @@
-"""Historical MET-style titles for Quick's native CSV/YML Saver."""
+"""Naming helpers for Quick's native CSV/YML Saver titles."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def representative(value: Any) -> float:
 
 
 def number_tag(value: Any, decimals: int = 3) -> str:
-    """Filesystem-friendly decimal used by the 2026-07-21 data names."""
+    """Return a filesystem-friendly decimal tag."""
     text = f"{representative(value):.{int(decimals)}f}"
     return text.replace("-", "m").replace("+", "p").replace(".", "p")
 

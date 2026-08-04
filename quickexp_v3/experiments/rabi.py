@@ -23,8 +23,8 @@ class Rabi(Experiment):
         "q_length",
     )
     axis_candidates = ("q_gain", "q_length")
-    # The working MET notebook acquires raw IQ/amplitude, not thresholded
-    # population. Keep that behavior unless a launcher explicitly opts in.
+    # Native acquisition records raw IQ/amplitude, not thresholded population.
+    # Keep that behavior unless a launcher explicitly opts in.
     default_run_options = {"silent": True, "population": False}
 
     def build(self, config):

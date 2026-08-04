@@ -29,7 +29,7 @@ LIVE_HARDWARE = False
 
 # None selects the newest one-dimensional ResonatorSpectroscopy CSV/YML pair.
 # To fit a particular run, paste its CSV path as a raw string:
-# INPUT_CSV = r"Z:\David\Data\folder\00001 - (ResonatorSpectroscopy)name.csv"
+# INPUT_CSV = r"Z:\Your\Data\folder\00001 - (ResonatorSpectroscopy)name.csv"
 INPUT_CSV = None
 
 # Choose amplitude, phase, I, Q, or IQ. IQ uses the principal measured axis.

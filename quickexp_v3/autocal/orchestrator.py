@@ -68,16 +68,16 @@ class ReplaySummary:
 
 
 def _default_device() -> DeviceModel:
-    """Use the accepted real-data cosine as the simulation's nominal device."""
+    """Return the deterministic nominal device used by offline calibration."""
     return DeviceModel(
-        resonator_base_mhz=6884.186011,
-        resonator_flux_amplitude_mhz=0.620565,
-        resonator_flux_period_z=0.184257,
-        resonator_flux_peak_z=-0.072305,
+        resonator_base_mhz=6884.0,
+        resonator_flux_amplitude_mhz=0.5,
+        resonator_flux_period_z=0.2,
+        resonator_flux_peak_z=0.0,
         resonator_linewidth_mhz=0.45,
         punchout_transition_power_db=-30.0,
         punchout_width_db=3.0,
-        qubit_max_frequency_mhz=5606.5,
+        qubit_max_frequency_mhz=5600.0,
         qubit_power_broadening_mhz_per_gain=4.0,
         t1_us=6.2,
         t2_ramsey_us=1.8,

@@ -24,7 +24,7 @@ LIVE_HARDWARE = False
 
 # None selects the newest one-dimensional LoopBack CSV/YML pair.
 # To fit a particular run, paste its CSV path as a raw string:
-# INPUT_CSV = r"Z:\David\Data\folder\00001 - (LoopBack)name.csv"
+# INPUT_CSV = r"Z:\Your\Data\folder\00001 - (LoopBack)name.csv"
 INPUT_CSV = None
 
 # Run 02 with READOUT_OFFSET_US = 0 before fitting so the rising pulse edge is

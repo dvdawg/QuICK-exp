@@ -55,7 +55,7 @@ def test_device_report_renders_top_level_proposal_records(tmp_path):
         "proposal-1": {
             "proposal_id": "proposal-1",
             "record": "defaults.q_freq",
-            "value": 5606.75,
+            "value": 5600.25,
             "status": "proposed",
         }
     }
@@ -71,4 +71,4 @@ def test_device_report_renders_top_level_proposal_records(tmp_path):
         report_date=date(2026, 7, 29),
     )
     report = artifacts.markdown_path.read_text(encoding="utf-8")
-    assert "| defaults.q_freq | proposal-1 | proposed | 5606.75 |" in report
+    assert "| defaults.q_freq | proposal-1 | proposed | 5600.25 |" in report

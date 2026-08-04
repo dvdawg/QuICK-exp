@@ -63,6 +63,6 @@ def test_title_override_reaches_backend_plan(tmp_path):
     planned = runner.plan(
         "qubit_spectroscopy",
         "qubit_fine",
-        title="QubitSpec_Zp0p0000_r6883p110",
+        title="QubitSpec_Zp0p0000_r6884p000",
     )
-    assert planned.plan.title == "QubitSpec_Zp0p0000_r6883p110"
+    assert planned.plan.title == "QubitSpec_Zp0p0000_r6884p000"

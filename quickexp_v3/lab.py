@@ -256,7 +256,7 @@ def install_held_z_experiment(quick_module: Any):
     class SetZBiasAndWaitV3(base_experiment):
         def __init__(self, **kwargs):
             self.var = {
-                "z": 15,
+                "z": 2,
                 "z_gain": 0.0,
                 "z_length": 0.2,
                 "z_settle": 5.0,

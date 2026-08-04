@@ -1,63 +1,63 @@
 schema_version: 3
 revision: 2
-updated_at: "2026-07-21"
+updated_at: "2000-01-01"
 
 records:
   defaults:
     r_freq:
-      value: 6883.11
+      value: 6884.0
       unit: MHz
       uncertainty: null
       provenance:
-        source: 2026-07-21 MET v191.ipynb
-        note: focused two-photon/dispersive readout working point
+        source: synthetic-example
+        note: Replace this synthetic value before live use.
       quality:
-        status: notebook_working_value
+        status: synthetic
       valid_domain:
         z_gain: [0.0, 0.0]
-      model: manual_notebook_transfer
+      model: synthetic-example
       status: accepted
     q_freq:
-      value: 5606.5
+      value: 5600.0
       unit: MHz
       uncertainty: null
       provenance:
-        source: 2026-07-21 MET v191.ipynb
-        note: compact fixed-Z T1/Ramsey working point
+        source: synthetic-example
+        note: Replace this synthetic value before live use.
       quality:
-        status: notebook_working_value
+        status: synthetic
       valid_domain:
         z_gain: [0.0, 0.0]
-      model: manual_notebook_transfer
+      model: synthetic-example
       status: accepted
     r_offset:
-      value: 0.495
+      value: 0.5
       unit: us
       uncertainty: null
       provenance:
-        source: 2026-07-21 MET v191.ipynb
-        note: raw readout trigger offset; rerun 02 after routing changes
+        source: synthetic-example
+        note: Replace this synthetic value before live use.
       quality:
-        status: notebook_working_value
+        status: synthetic
       valid_domain: {}
-      model: loopback_edge
+      model: synthetic-example
       status: accepted
   lookups:
     resonator_vs_flux:
       value:
         parameters:
-          center_frequency: 6884.186011
-          amplitude: 0.620565
-          period: 0.184257
-          peak_bias: -0.072305
+          center_frequency: 6884.0
+          amplitude: 0.5
+          period: 0.2
+          peak_bias: 0.0
       unit: MHz
       uncertainty:
-        rmse_mhz: 0.064913957
+        rmse_mhz: 0.05
       provenance:
-        source: 2026-07-21_MET_ver191_qubit3/00025 - ResVsZ_held_bias.csv
-        notebook: 2026-07-21 MET v191.ipynb cell 11
+        source: synthetic-resonator-vs-flux.csv
+        notebook: null
       quality:
-        r_squared: 0.978275
+        r_squared: 0.99
       valid_domain:
         z_gain: [-0.4, 0.4]
       model: cosine

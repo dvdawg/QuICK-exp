@@ -31,7 +31,7 @@ def test_resolution_precedence_and_sweep_expansion():
     axis = resolved.expanded_parameters()["r_freq"]
     assert isinstance(axis, np.ndarray)
     assert axis.size == 101
-    assert np.mean(axis) == pytest.approx(6883.11)
+    assert np.mean(axis) == pytest.approx(6884.0)
 
 
 def test_rejected_calibration_never_enters_parameters():
@@ -72,14 +72,14 @@ def test_preset_experiment_mismatch_is_rejected():
         repo.resolve("t1", experiment="ramsey")
 
 
-def test_notebook_flux_fit_is_accepted_with_provenance():
+def test_example_flux_calibration_is_explicitly_synthetic():
     record = repository().calibration["records"]["lookups"]["resonator_vs_flux"]
     assert record["status"] == "accepted"
-    assert record["quality"]["r_squared"] == pytest.approx(0.978275)
-    assert "00025" in record["provenance"]["source"]
+    assert record["quality"]["r_squared"] == pytest.approx(0.99)
+    assert record["provenance"]["source"] == "synthetic-resonator-vs-flux.csv"
 
 
-def test_all_example_presets_build_with_met_channels():
+def test_all_example_presets_build_with_generic_channels():
     from quickexp_v3.experiments.registry import get
 
     repo = repository()
@@ -91,4 +91,4 @@ def test_all_example_presets_build_with_met_channels():
         assert plan.variables["q"] == 1
         assert plan.variables["r"] == 0
         assert plan.variables["rr"] == 0
-        assert plan.variables["z"] == 15
+        assert plan.variables["z"] == 2

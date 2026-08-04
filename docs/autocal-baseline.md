@@ -1,10 +1,14 @@
 # Automated-calibration decision baseline
 
-Refreshed 2026-08-03 from the repository root with:
+This reference snapshot is generated from the repository root with:
 
 ```console
 python -m tools.baseline_legacy
 ```
+
+These results are deterministic synthetic-device benchmarks, not hardware
+acceptance thresholds. Regenerate them after changing the policy, simulator, or
+probe signatures, and validate deployment thresholds against labeled data.
 
 ```text
 class                   n  false_acc  false_rej  propagate   median_s   escalate    error
@@ -18,16 +22,16 @@ wrong_prior            30      0.000      0.000      0.000        nan      1.000
 overall               210      0.133      0.410      0.000    596.504      0.552    0.000
 ```
 
-The legacy gate falsely accepts 24 of 30 f02-shadow chips and 4 of 30
-neighbor-qubit chips. It falsely rejects every low-SNR and TLS chip, 20
-neighbor-qubit chips, and 6 f02-shadow chips. Wrong-prior chips escalate but do
+The legacy gate falsely accepts 24 of 30 f02-shadow cases and 4 of 30
+neighbor-qubit cases. It falsely rejects every low-SNR and TLS case, 20
+neighbor-qubit cases, and 6 f02-shadow cases. Wrong-prior cases escalate but do
 not count as false rejects because the answer was outside the acquired window.
 Wrong-value propagation is zero here because this Phase 0 runner measures the
 N5 decision in isolation and does not execute downstream nodes.
 
 ## Phase 1 — candidates and coverage
 
-Measured on the same 210 chips with:
+Measured on the same 210 synthetic devices with:
 
 ```console
 python -m tools.baseline_hp
@@ -92,18 +96,21 @@ suggested_margin_threshold=2
 
 The perturbation path eliminates all 28 legacy wrong accepts and permits no
 wrong value to proceed downstream. It also reduces false rejects from 86 to 73
-chips versus the legacy gate, while deliberately escalating more ambiguity
-than Phase 1. The extra time is the measured cost of identity evidence; it is
-reported as a monitor rather than traded against the primary safety metric.
+synthetic cases versus the legacy gate, while deliberately escalating more
+ambiguity than Phase 1. The extra time is the measured cost of identity
+evidence; it is reported as a monitor rather than traded against the primary
+safety metric.
 
-The 2.0 cutoff is the least restrictive threshold validated by this run. The
-calibrator will not infer a lower cutoff from these results, because lowering
-the margin can stop the probe sequence earlier and change the evidence. A
-different cutoff requires a new full run.
+The 2.0 cutoff is the least restrictive threshold validated by this synthetic
+run; it is not a hardware-ready default. The calibrator will not infer a lower
+cutoff from these results, because lowering the margin can stop the probe
+sequence earlier and change the evidence. A different cutoff requires a new
+full run.
 
 ## Phase 4 — adaptive two-dimensional acquisition
 
-Measured over the same 210 seeded chips against the fixed 13-row resonator map:
+Measured over the same 210 seeded synthetic devices against the fixed 13-row
+resonator map:
 
 ```console
 python -m tools.adaptive_zoo
@@ -117,9 +124,9 @@ median_fixed_rmse_mhz=8.17818851e-09
 noninferior_fraction=1
 ```
 
-The adaptive scheduler uses at most 7 of 13 rows (53.85%). Every chip is
-non-inferior within the declared 1e-6 MHz numerical tolerance; the two median
-errors differ only at floating-point scale.
+The adaptive scheduler uses at most 7 of 13 rows (53.85%). Every synthetic
+device is non-inferior within the declared 1e-6 MHz numerical tolerance; the
+two median errors differ only at floating-point scale.
 
 ## Archived-trace reality check
 

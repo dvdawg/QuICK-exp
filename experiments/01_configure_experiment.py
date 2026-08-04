@@ -27,52 +27,52 @@ from quickexp_v3.config import ConfigRepository
 WRITE_CHANGES = False
 
 # Quick's native Saver writes one numbered .csv and .yml pair here.
-DATA_OUTPUT_DIRECTORY = r"Z:\David\Data\2026-07-21_MET_ver191_qubit3"
+DATA_OUTPUT_DIRECTORY = r"Z:\Your\Output\Directory"
 QUICK_NATIVE_OUTPUT = True
 SHOW_PROGRESS = True
 # terminal: IDE/PowerShell; notebook: Jupyter widget; auto: environment detection.
 PROGRESS_MODE = "terminal"
 
 DEVICE = {
-    "name": "MET_v191",
-    "chip": "MET",
-    "package": "v191",
-    "cooldown": "2026-07-21",
-    "qubits": ["q3"],
-    "resonators": ["r3"],
+    "name": "example-device",
+    "chip": "example-chip",
+    "package": "example-package",
+    "cooldown": "Your-Cooldown-Date",   
+    "qubits": ["q0"],
+    "resonators": ["r0"],
 }
 
 QICK_CONNECTION = {
-    "host": "192.168.1.17",
+    "host": "qick-controller.example.invalid",
     "pyro_port": 8888,
     "proxy_name": "qick",
     "qick_version": "0.7.2",
-    "bitfile": "MET_v191",
+    "bitfile": None,
 }
 
 # Logical Quick/QICK indices, not physical connector numbers.
 CHANNEL_INDICES = {
     "r": 0,   # DAC0
-    "rr": 0,  # ADC4
+    "rr": 0,  # ADC0
     "q": 1,   # DAC1
-    "z": 15,  # DAC15
+    "z": 2,   # DAC2
 }
 
 DEFAULT_PARAMETERS = {
-    "r_freq": 6883.11,
+    "r_freq": 6884.0,
     "r_power": -35.0,
     "r_length": 2.0,
-    "r_offset": 0.495,
+    "r_offset": 0.5,
     "r_phase": 0.0,
     "r_relax": 20.0,
     "r_reset": 0,
     "r_threshold": 0.0,
-    "q_freq": 5606.5,
+    "q_freq": 5600.0,
     "q_gain": 0.4,
-    "q_length": 0.2,
+    "q_length": 0.1,
     "q_delta": -180.0,
     "q_gain_2": 0.2,
-    "q_length_2": 0.115,
+    "q_length_2": 0.1,
     "z_gain": 0.0,
     "z_length": 0.2,
     "z_settle": 5.0,
@@ -97,7 +97,7 @@ RF_BOARD_APPLY_ON_CONNECT = False
 # Example:
 # PRESET_PARAMETER_UPDATES = {
 #     "qubit_fine": {
-#         "q_freq": {"center": 5606.5, "span": 20.0, "points": 201, "unit": "MHz"},
+#         "q_freq": {"center": 5600.0, "span": 20.0, "points": 201, "unit": "MHz"},
 #         "hard_avg": 5000,
 #     },
 # }

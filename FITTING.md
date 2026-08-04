@@ -1,7 +1,7 @@
 # Native Quick fitting
 
 The fitting launchers are analysis-only Python files. They do not connect to
-QICK and can be run directly with the IDE Run button.
+QICK and can be run directly with Python or an editor's run command.
 
 ## Selecting input data
 
@@ -12,10 +12,7 @@ Every fitter has the same `INPUT_CSV` setting:
 INPUT_CSV = None
 
 # Or one specific run:
-INPUT_CSV = (
-    r"Z:\David\Data\2026-07-21_MET_ver191_qubit3"
-    r"\00054 - (ResonatorSpectroscopy)Zp0p0000_resonator_spec.csv"
-)
+INPUT_CSV = r"/path/to/data/run.csv"
 ```
 
 Point to the CSV itself, not its directory. The paired YML must have the same
@@ -23,10 +20,7 @@ base filename and remain beside it. Use a raw string (`r"..."`), forward
 slashes, or a raw UNC path:
 
 ```python
-INPUT_CSV = (
-    r"\\136.152.250.235\QDG\David\Data"
-    r"\2026-07-21_MET_ver191_qubit3\00054 - example.csv"
-)
+INPUT_CSV = r"\\file-server\share\path\to\run.csv"
 ```
 
 When `INPUT_CSV = None`, two-dimensional files and files belonging to another
@@ -59,7 +53,7 @@ For a broad qubit spectroscopy scan with several candidate features, set
 `FIT_WINDOW_MHZ` around the one feature that should be calibrated:
 
 ```python
-FIT_WINDOW_MHZ = (5595.0, 5615.0)
+FIT_WINDOW_MHZ = (MIN_MHZ, MAX_MHZ)  # replace with numeric bounds
 ```
 
 ## Accepting a fit
@@ -81,13 +75,13 @@ Writing `q_freq` therefore requires both:
 ```python
 WRITE_ACCEPTED_FIT = True
 UPDATE_Q_FREQUENCY = True
-Q_FREQUENCY_CORRECTION_SIGN = +1  # Quick/notebook convention
+# Choose a sign, then verify it experimentally.
+Q_FREQUENCY_CORRECTION_SIGN = +1
 ```
 
 Repeat Ramsey at the proposed frequency and verify that the fitted fringe moves
 toward the programmed artificial fringe before treating the sign as confirmed.
 
-For loopback, acquire the calibration trace with
-`READOUT_OFFSET_US = 0`. This leaves the rising DAC-to-ADC edge inside the
-record. A trace already aligned near the accepted offset can clip the edge and
-will fail the quality gates.
+For loopback, set `READOUT_OFFSET_US` so the complete rising DAC-to-ADC edge
+stays inside the recorded window. A trace aligned too close to a record boundary
+can clip the edge and fail the quality gates.

@@ -44,7 +44,7 @@ def _repository(root):
     )
 
 
-def _proposal(value=5606.8, *, source="first.csv"):
+def _proposal(value=5600.3, *, source="first.csv"):
     return {
         "record": "defaults.q_freq",
         "value": value,
@@ -81,11 +81,11 @@ def test_proposals_are_inert_to_resolution_and_retake_replaces(tmp_path):
 
     write_calibration_proposals(
         tmp_path,
-        {"retake-proposal": _proposal(5606.9, source="retake.csv")},
+        {"retake-proposal": _proposal(5600.4, source="retake.csv")},
     )
     proposals = list_open_proposals(tmp_path)
     assert [proposal_id for proposal_id, _ in proposals] == ["retake-proposal"]
-    assert proposals[0][1]["value"] == 5606.9
+    assert proposals[0][1]["value"] == 5600.4
     assert proposals[0][1]["proposal_id"] == "retake-proposal"
 
 
@@ -116,7 +116,7 @@ def test_promote_stamps_lifecycle_bumps_revision_and_versions_previous(tmp_path)
     assert document["history"][-1]["record"] == "defaults.q_freq"
     assert _repository(tmp_path).resolve("qubit_fine").references[
         "q_freq"
-    ] == pytest.approx(5606.8)
+    ] == pytest.approx(5600.3)
 
 
 def test_reject_archives_without_touching_accepted_record_or_revision(tmp_path):

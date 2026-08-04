@@ -86,7 +86,7 @@ def test_install_all_authored_programs_is_idempotent():
     )
     first = install_authored_programs(
         quick,
-        channel_variables={"r": 4, "rr": 2, "q": 5, "z": 15},
+        channel_variables={"r": 4, "rr": 2, "q": 5, "z": 2},
     )
     second = install_authored_programs(quick)
 

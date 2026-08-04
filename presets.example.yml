@@ -9,7 +9,7 @@ presets:
       r_freq: 5500.0
       r_power: 0.0
       r_length: 10.0
-      r_offset: 0.495
+      r_offset: 0.5
       soft_avg: 100
     run:
       dB: false
@@ -145,7 +145,7 @@ presets:
     parameters:
       q_freq: {center_from: defaults.q_freq, span: 20.0, points: 81, unit: MHz}
       q_gain: {start: 0.02, stop: 0.8, points: 80, unit: a.u.}
-      q_length: 0.115
+      q_length: 0.1
       cycle: 0
       r_power: -30.0
       r_length: 2.0
@@ -183,7 +183,7 @@ presets:
     experiment: rabi
     parameters:
       q_gain: {start: 0.0, stop: 0.8, points: 161, unit: a.u.}
-      q_length: 0.115
+      q_length: 0.1
       cycle: 0
       r_power: -30.0
       r_length: 2.0
@@ -213,12 +213,12 @@ presets:
   dispersive:
     experiment: dispersive_spectroscopy
     parameters:
-      r_freq: {center: 6883.36, span: 20.0, points: 1001, unit: MHz}
+      r_freq: {center: 6884.0, span: 20.0, points: 1001, unit: MHz}
       r_power: -35.0
       r_length: 1.0
-      q_freq: 5603.91
+      q_freq: 5600.0
       q_gain: 0.4
-      q_length: 0.115
+      q_length: 0.1
       hard_avg: 5000
       soft_avg: 10
     run:
@@ -249,7 +249,7 @@ presets:
       z_gain: {start: -0.2, stop: 0.2, points: 9, unit: a.u.}
       delay: {start: 0.1, stop: 30.0, points: 61, unit: us}
       q_gain: 0.4
-      q_length: 0.115
+      q_length: 0.1
       r_relax: 60.0
       hard_avg: 1000
       soft_avg: 1
@@ -282,8 +282,8 @@ presets:
       fringe_frequency_mhz: 5.0
       q_gain: 0.4
       q_gain_2: 0.2
-      q_length: 0.115
-      q_length_2: 0.115
+      q_length: 0.1
+      q_length_2: 0.1
       hard_avg: 10000
       soft_avg: 5
       rep: 1

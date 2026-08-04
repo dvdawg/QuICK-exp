@@ -41,7 +41,7 @@ def _readout_program(name="ReadoutProbe"):
         ("r_length", 2.0, "Readout length", "us"),
         ("r_power", -35.0, "Readout power", "dB"),
         ("r_phase", 0.0, "Readout phase", "deg"),
-        ("r_offset", 0.495, "Trigger offset", "us"),
+        ("r_offset", 0.5, "Trigger offset", "us"),
         ("r_relax", 20.0, "Relax", "us"),
     ):
         program.declare_variable(*declaration)

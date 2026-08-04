@@ -1,6 +1,8 @@
 # QuICK-exp v3
 
-QuICK-exp v3 a superconducting qubit measurement workflow of with shared YAML configuration, port verification, calibration precedence, recovery, and held-flux safety.
+QuICK-exp v3 is a superconducting-qubit measurement workflow with shared YAML
+configuration, port verification, calibration precedence, recovery, and
+held-flux safety.
 
 ## First use
 
@@ -94,14 +96,15 @@ decision without copying signal arrays.
 Create `autocal_runs/STOP` to stop cleanly between acquisitions. Resume by
 putting the prior session directory name in `SESSION_NAME`, after removing the
 sentinel. Use `92_review_proposals.py` to promote or reject L0 results. L1 and
-L2 promotion remain bounded by the hardware-owned `autocal` policy; cabling
-timing and flux lookup models are hard stops at every level.
+L2 promotion remain bounded by the hardware-owned `autocal` policy;
+`defaults.r_offset`, `lookups.resonator_vs_flux`, and
+`lookups.qubit_vs_flux` are hard stops at every level.
 
 The full synthetic cold-start graph, STOP/resume, budget exhaustion,
 failure escalation, proposal promotion, and read-only replay with native-pair
 re-fitting are covered offline. Live rollout is deliberately staged: run
 supervised L0 sessions before enabling L1. See
-[AUTOCAL.md](AUTOCAL.md) for the operator runbook.
+[docs/AUTOCAL.md](docs/AUTOCAL.md) for the operator runbook.
 
 The hardware policy can opt N5 into perturbation-based identity adjudication
 and N2/N3 into adaptive maps. These paths preserve the native acquisition and
@@ -171,7 +174,7 @@ Held-Z maps are combined into one native pair, for example
 directory is retained as legacy acquired data.
 
 Quick progress is enabled by `qick.show_progress: true`.
-`qick.progress_mode: terminal` is the correct renderer for terminal or IDE
+`qick.progress_mode: terminal` is recommended for terminal or IDE
 execution; use `notebook` inside Jupyter. Each native `quick.Sweep` bar shows
 percentage, elapsed/estimated time, and iterations per second. Multi-Z scans
 use the same renderer for outer rows.
@@ -207,9 +210,10 @@ and skip the auxiliary acquisition. Nonzero fixed-Z scripts establish the held
 bias on the configured Z output using scalar settings independent of the main
 sweep. Connections, acquisitions, and closes clear persistent QICK streamer
 state so an interrupted process cannot affect the next sweep. A retry resets
-the configured generators and reapplies held Z; exit returns Z to zero bias.
+the configured generators and reapplies held Z. A normal exit attempts to
+return Z to zero bias; a lost hardware link can prevent parking.
 
 RF-board programming remains disabled until its attenuation and filter settings
 have been reviewed for the active hardware and wiring.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for implementation boundaries.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for implementation boundaries.

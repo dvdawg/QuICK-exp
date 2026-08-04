@@ -34,26 +34,26 @@ def _proposal(address, value, *, node="N5", analysis="test"):
 
 def test_policy_levels_tolerances_hard_stops_and_special_cases():
     policy = load_autocal_policy(_repository().hardware)
-    q_frequency = _proposal("defaults.q_freq", 5606.8)
+    q_frequency = _proposal("defaults.q_freq", 5600.3)
 
     assert not policy.promotion_decision(
         autonomy_level=0,
         proposal=q_frequency,
-        current_value=5606.5,
+        current_value=5600.0,
         gates_pass=True,
         working_z_gain=0.1,
     ).promote
     assert policy.promotion_decision(
         autonomy_level=1,
         proposal=q_frequency,
-        current_value=5606.5,
+        current_value=5600.0,
         gates_pass=True,
         working_z_gain=0.1,
     ).promote
     assert not policy.promotion_decision(
         autonomy_level=1,
-        proposal=_proposal("defaults.q_freq", 5608.0),
-        current_value=5606.5,
+        proposal=_proposal("defaults.q_freq", 5601.5),
+        current_value=5600.0,
         gates_pass=True,
         working_z_gain=0.1,
     ).promote
@@ -67,28 +67,28 @@ def test_policy_levels_tolerances_hard_stops_and_special_cases():
         autonomy_level=2,
         proposal=_proposal(
             "defaults.r_freq",
-            6883.2,
+            6884.1,
             node="N10r",
         ),
-        current_value=6883.1,
+        current_value=6884.0,
         gates_pass=True,
     ).promote
     ramsey = _proposal(
         "defaults.q_freq",
-        5606.7,
+        5600.2,
         node="N12",
         analysis="quickexp_v3.native_fit.fit_ramsey",
     )
     assert not policy.promotion_decision(
         autonomy_level=1,
         proposal=ramsey,
-        current_value=5606.5,
+        current_value=5600.0,
         gates_pass=True,
     ).promote
     assert policy.promotion_decision(
         autonomy_level=1,
         proposal=ramsey,
-        current_value=5606.5,
+        current_value=5600.0,
         gates_pass=True,
         ramsey_sign_confirmed=True,
     ).promote
@@ -131,8 +131,8 @@ def test_missing_hardware_policy_is_proposal_only_at_every_level():
     policy = load_autocal_policy(hardware)
     decision = policy.promotion_decision(
         autonomy_level=2,
-        proposal=_proposal("defaults.q_freq", 5606.6),
-        current_value=5606.5,
+        proposal=_proposal("defaults.q_freq", 5600.1),
+        current_value=5600.0,
         gates_pass=True,
     )
     assert not decision.promote

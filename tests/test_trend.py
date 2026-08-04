@@ -16,23 +16,20 @@ from quickexp_v3.trend import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_harvest_repo_flux_lookup_has_three_revision_ordered_points(tmp_path):
+def test_harvest_example_flux_lookup_has_one_synthetic_point(tmp_path):
     generated = harvest_calibration_trends(
-        ROOT / "calibration.yml",
+        ROOT / "calibration.example.yml",
         tmp_path / "trends",
     )
     path = generated["lookups.resonator_vs_flux"]
     rows = read_trend(path)
 
     assert path.name == "lookups.resonator_vs_flux.csv"
-    assert len(rows) == 3
+    assert len(rows) == 1
     assert tuple(rows[0]) == TREND_COLUMNS
-    assert [row["origin"] for row in rows] == ["history", "history", "accepted"]
-    assert [int(row["calibration_revision"]) for row in rows] == [2, 3, 4]
-    assert np.allclose(
-        [float(row["value"]) for row in rows],
-        [6884.186011, 6884.186010629018, 6884.186010629018],
-    )
+    assert [row["origin"] for row in rows] == ["accepted"]
+    assert [int(row["calibration_revision"]) for row in rows] == [2]
+    assert np.allclose([float(row["value"]) for row in rows], [6884.0])
     assert float(rows[-1]["uncertainty"]) > 0
 
 

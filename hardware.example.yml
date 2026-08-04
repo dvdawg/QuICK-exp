@@ -1,31 +1,31 @@
 schema_version: 3
 
 site:
-  lab: QDG
-  timezone: America/Los_Angeles
+  lab: example-lab
+  timezone: UTC
   operator: null
 
 device:
-  name: MET_v191
-  chip: MET
-  package: v191
-  cooldown: "2026-07-21"
-  qubits: [q3]
-  resonators: [r3]
+  name: example-device
+  chip: example-chip
+  package: example-package
+  cooldown: null
+  qubits: [q0]
+  resonators: [r0]
 
 storage:
   quick_native_output: true
   quick_native_root: ./data
 
 qick:
-  host: 192.168.1.17
+  host: qick-controller.example.invalid
   pyro_port: 8888
   proxy_name: qick
   board_model: null
   board_serial: null
   qick_version: 0.7.2
   firmware: null
-  bitfile: MET_v191
+  bitfile: null
   bitfile_sha256: null
   reference_clock_mhz: null
   reset_generators_on_connect: true
@@ -34,7 +34,6 @@ qick:
   show_progress: true
   progress_mode: terminal
 
-# Verified from the soccfg printed by 2026-07-21 MET v191.ipynb.
 # Logical indices are Quick/QICK indices, not physical connector numbers.
 channels:
   r:
@@ -44,7 +43,7 @@ channels:
     nyquist_zone: 1
   rr:
     ro: 0
-    physical_port: ADC4
+    physical_port: ADC0
     readout_type: axis_dyn_readout_v1
     matched_generator: r
   q:
@@ -53,13 +52,13 @@ channels:
     generator_type: axis_signal_gen_v6
     nyquist_zone: 1
   z:
-    gen: 15
-    physical_port: DAC15
+    gen: 2
+    physical_port: DAC2
     generator_type: axis_sg_int4_v2
     coupling: dc
 
-# Direct DAC0/DAC1/ADC4 operation in the MET notebook did not require RF-board
-# programming. Keep this disabled until settings are deliberately reviewed.
+# RF-board programming is disabled in this public example and must be reviewed
+# before live use.
 rf_board:
   apply_on_connect: false
   generators:
@@ -119,23 +118,22 @@ flux_lines:
     readback_tolerance: 0.0001
     owns_output: false
 
-# Working values transcribed from the compact fixed-Z section of the notebook.
-# They are starting points, not universal calibration for every Z bias.
+# Synthetic public defaults; replace before live use.
 defaults:
-  r_freq: 6883.11
+  r_freq: 6884.0
   r_power: -35.0
   r_length: 2.0
-  r_offset: 0.495
+  r_offset: 0.5
   r_phase: 0.0
   r_relax: 20.0
   r_reset: 0
   r_threshold: 0.0
-  q_freq: 5606.5
+  q_freq: 5600.0
   q_gain: 0.4
-  q_length: 0.115
+  q_length: 0.1
   q_delta: -180.0
   q_gain_2: 0.2
-  q_length_2: 0.115
+  q_length_2: 0.1
   z_gain: 0.0
   z_length: 0.2
   z_settle: 5.0

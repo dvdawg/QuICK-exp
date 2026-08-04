@@ -51,7 +51,7 @@ QUICK_CONFIG_OVERRIDES = (
 QUICK_CONFIG_OVERRIDES_BY_CLASS = {
     # Decimated data for every hard repetition must fit in the on-board
     # accumulation buffer. The installed LoopBack template uses soft_avg and
-    # leaves hard_avg/reps at one, matching the MET notebook.
+    # leaves hard_avg/reps at one.
     "LoopBack": ("soft_avg",),
 }
 
@@ -454,7 +454,7 @@ class QuickBackend:
         )
 
     def recover(self, error: BaseException, attempt: int) -> dict:
-        """Use the MET notebook's stop, drain, reset recovery order."""
+        """Stop, drain, and reset acquisition state before a retry."""
         details = clean_qick_acquisition_state(
             self.soc,
             reset_generators=True,
@@ -816,7 +816,7 @@ class SyntheticBackend:
                 detuning = q_frequency - true_frequency
                 omega = device.rabi_rate(variable("q_gain", 0.4))
                 generalized = np.sqrt(omega**2 + detuning**2)
-                duration = variable("q_length", 0.115)
+                duration = variable("q_length", 0.1)
                 population = (
                     omega**2
                     / np.maximum(generalized**2, np.finfo(float).eps)

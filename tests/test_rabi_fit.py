@@ -59,7 +59,7 @@ def write_rabi_pair(
             "var": {
                 "q_freq": 3939.5,
                 "q_gain": 0.2,
-                "q_length": 0.115,
+                "q_length": 0.1,
                 "z_gain": 0.14,
             },
         },

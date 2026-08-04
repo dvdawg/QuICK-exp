@@ -37,7 +37,7 @@ def test_rabi_family_matches_working_notebook_controls(preset):
     assert variables["rep"] == 1000
     assert variables["r_power"] == -30.0
     assert variables["r_length"] == 2.0
-    assert variables["r_offset"] == 0.495
+    assert variables["r_offset"] == 0.5
     assert variables["r_relax"] == 20.0
     assert variables["cycle"] == 0
     assert variables["z_length"] == 0.2

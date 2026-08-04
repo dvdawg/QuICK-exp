@@ -1,6 +1,6 @@
 # Automated calibration operator runbook
 
-Automated calibration uses the same configuration resolution, IDE acquisition
+Automated calibration uses the same configuration resolution, acquisition
 helpers, Quick retry/recovery, held-Z cleanup, native CSV/YML pairs, and fit
 gates as the numbered manual workflow. It decides which measurement to run
 next; it does not introduce a second acquisition stack.
@@ -13,11 +13,12 @@ Open `experiments/91_autocal.py` and begin with:
 LIVE_HARDWARE = False
 SESSION_NAME = None
 TARGET = "full_cold_start"
-Z_GAIN = 0.0
 AUTONOMY_LEVEL = 0
-MAX_WALL_CLOCK_HOURS = 8.0
 REPLAY_SESSION = None
 ```
+
+Set `Z_GAIN` and `MAX_WALL_CLOCK_HOURS` to values permitted by the active
+hardware policy before a live run.
 
 The supported targets are:
 
@@ -58,7 +59,7 @@ from a configured policy.
 
 Identity-critical decisions are opt-in per node. The shipped hardware example
 keeps both migrations disabled so copying it cannot silently change an existing
-lab workflow. Enable the reviewed paths deliberately:
+installation. Enable the reviewed paths deliberately:
 
 ```yaml
 autocal:
@@ -70,15 +71,15 @@ With N5 enabled, qubit spectroscopy emits every ranked feature plus a null
 candidate. It checks whether the scan could answer the question, then probes
 candidate identity in cost order: drive-power ladder, held-flux nudge,
 dispersive response, and two-gain Rabi. Every acquisition still goes through
-the registered experiment/preset and existing IDE safety path. The held-flux
+the registered experiment/preset and existing safety path. The held-flux
 probe uses the existing flux-sweep parking and recovery behavior.
 
 The identity verdict depends only on the score margin between physical
 hypotheses. Absolute goodness-of-fit thresholds are not part of that verdict.
-The example `margin_threshold: 2.0` is the conservative zoo-validated setting:
-the 210-chip run at that threshold has zero false accepts. The harness never
-claims that a lower threshold is safe from a higher-threshold run, because a
-lower cutoff can stop the probe battery earlier. Rerun
+Validate `margin_threshold` with the hypothesis harness and a representative
+labeled corpus before enabling promotion. The harness never claims that a
+lower threshold is safe from a higher-threshold run, because a lower cutoff can
+stop the probe battery earlier. Rerun
 `python -m tools.baseline_hypothesis` after changing the threshold, device
 model, or probe signatures. A coverage failure is class A and changes
 acquisition parameters. A competing physical identity is class B and runs the
@@ -92,9 +93,8 @@ promoted again in the same session.
 
 ## Adaptive maps and physics report
 
-N2 and N3 can acquire rows adaptively. Both start with five spanning rows,
-abort a map that has fewer than three trackable features at the reviewed abort
-point, and use at most the configured seven rows. N3 recenters each frequency
+N2 and N3 can acquire rows adaptively. Their initial, abort, feature-count, and
+maximum-row limits come from the adaptive policy. N3 recenters each frequency
 window on the previous fitted notch. The combined result remains one native
 CSV/YML pair, including when row frequency axes differ.
 
@@ -130,9 +130,10 @@ actions. A validated suggestion is stored as `validated_not_executed`; it is
 never acquired automatically. A proposed novel pulse program remains report
 text for manual implementation.
 
-External advisory use therefore needs two deliberate lab decisions: outbound
-access to the configured API endpoint and approval for the listed metadata and
-PNG overlays to leave the lab network. Keep `mode: null` otherwise.
+External advisory use therefore needs two deliberate operator decisions:
+outbound access to the configured API endpoint and approval for the listed
+metadata and PNG overlays to leave the organization's network. Keep
+`mode: null` otherwise.
 
 ## Stop and resume
 
@@ -167,24 +168,25 @@ session files.
 
 ## Validation commands
 
-Run the same seeded harness used to select the identity margin:
+Run the seeded validation harnesses. Pass deployment-appropriate `--count` and
+`--margin-threshold` values to `tools.baseline_hypothesis`:
 
-```powershell
+```console
 python -m tools.baseline_legacy
 python -m tools.baseline_hp
-python -m tools.baseline_hypothesis --count 210 --margin-threshold 2.0
+python -m tools.baseline_hypothesis
 python -m tools.adaptive_zoo
 ```
 
 The first two tables are retained in `docs/autocal-baseline.md`; the third
 reports the production hypothesis path and all five decision metrics per
 defect class. `tools.adaptive_zoo` compares lookup error against the fixed
-13-row map and reports the row fraction.
+reference map configured by the harness and reports the row fraction.
 
 Real cooldown traces are the remaining external validation input. Add
 operator-reviewed entries to `tests/fixtures/labeled/manifest.yml`, then run:
 
-```powershell
+```console
 python -m tools.archived_trace_regression
 ```
 
@@ -215,7 +217,7 @@ its older open proposal.
 Offline completion establishes control-flow coherence, not hardware validity.
 Before unattended use:
 
-1. complete the authored-program hardware gates in `plans/20-pulses.md`;
+1. complete the installation's authored-program hardware-readiness checks;
 2. run `readout_only`, then `flux_point`, then `full_cold_start` at L0 with an
   operator watching;
 3. review every native trace, scorecard, and discrepancy entry through 92;
@@ -224,8 +226,9 @@ Before unattended use:
 5. tune margins only from labeled zoo/archive outcomes and repeatability;
 6. enable L1 first for `coherence_only`, then expand cautiously.
 
-The missing bitfile hash, reference clock, and ADC full-scale values remain
-explicitly visible in session facts. A lost hardware link can prevent software
-from commanding a held RF Z line to park. Exhausted connection or acquisition
-retries end the session with `critical_abort`; treat that condition as a
-physical operator escalation, not as proof of a safe zero.
+Record available platform identifiers, clock references, and digitizer scaling
+in session facts; treat absent fields as unknown. If the installation uses a
+held flux or Z output, a lost hardware link can prevent software from parking
+it. Exhausted connection or acquisition retries end the session with
+`critical_abort`; treat that condition as a physical operator escalation, not
+as proof of a safe zero.

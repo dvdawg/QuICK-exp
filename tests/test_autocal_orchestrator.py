@@ -432,10 +432,10 @@ def test_shifted_qubit_outside_expected_window_uses_widening_ladder(
         encoding="utf-8",
     )
     device = DeviceModel(
-        resonator_base_mhz=6884.186011,
-        resonator_flux_amplitude_mhz=0.620565,
-        resonator_flux_period_z=0.184257,
-        resonator_flux_peak_z=-0.072305,
+        resonator_base_mhz=6884.0,
+        resonator_flux_amplitude_mhz=0.5,
+        resonator_flux_period_z=0.2,
+        resonator_flux_peak_z=0.0,
         resonator_linewidth_mhz=0.45,
         punchout_transition_power_db=-30.0,
         punchout_width_db=3.0,

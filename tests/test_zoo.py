@@ -154,7 +154,7 @@ def test_flux_dependent_feature_broadcasts_over_a_sweep():
 
 def test_injected_feature_appears_in_synthesized_trace():
     device = DeviceModel(
-        qubit_max_frequency_mhz=5606.5,
+        qubit_max_frequency_mhz=5600.0,
         qubit_sweet_spot_z=0.0,
         spurious_features=(
             SpuriousFeature(
@@ -177,7 +177,7 @@ def test_absent_injection_leaves_the_clean_device_unchanged():
     frequency = np.linspace(5590.0, 5620.0, 601)
     payload = clean.acquire(_qubit_plan(frequency)).payload
     peak_frequency = payload[np.argmax(payload[:, 1]), 0]
-    assert abs(peak_frequency - 5606.5) < 1.0
+    assert abs(peak_frequency - 5600.0) < 1.0
 
 
 def test_resonator_power_db_is_converted_to_linear_feature_gain():

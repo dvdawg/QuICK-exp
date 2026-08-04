@@ -70,7 +70,7 @@ class DeviceModel:
     punchout_shift_mhz: float = 1.2
     punchout_transition_power_db: float = -20.0
     punchout_width_db: float = 4.0
-    qubit_max_frequency_mhz: float = 5606.5
+    qubit_max_frequency_mhz: float = 5600.0
     qubit_flux_period_z: float = 0.30
     qubit_sweet_spot_z: float = 0.0
     qubit_asymmetry: float = 0.19

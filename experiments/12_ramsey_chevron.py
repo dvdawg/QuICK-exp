@@ -17,7 +17,7 @@ LIVE_HARDWARE = True
 Z_GAIN = 0.0
 USE_ACCEPTED_RESONATOR_FLUX_FIT = True
 # Used only when the accepted-fit option above is False.
-READOUT_FREQUENCY_MHZ = 6883.11
+READOUT_FREQUENCY_MHZ = 6884.0
 Q_FREQUENCY_MHZ = np.arange(5601.5, 5611.5, 0.25)
 DELAY_US = np.arange(0.0, 5.0, 0.02)
 FRINGE_FREQUENCY_MHZ = 0.0

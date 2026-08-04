@@ -24,7 +24,7 @@ from quickexp_v3.rabi_fit import (
 LIVE_HARDWARE = False
 
 # None selects the newest matching native Quick CSV/YML pair.
-INPUT_CSV = r"Z:\David\Data\2026-07-21_MET_ver191_qubit3\00073 - (Rabi)Zp0p1400_rabi_q3959p000.csv"
+INPUT_CSV = None
 # q_length fits Time Rabi; q_gain fits Power Rabi; auto uses the newest of both.
 FIT_VARIABLE = "q_length"
 

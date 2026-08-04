@@ -23,13 +23,13 @@ TASKS = [
         "file": "08a_time_rabi.py",
         "label": "Time Rabi",
         "enabled": True,
-        "settings": {"Q_FREQUENCY_MHZ" : 3950, "Q_GAIN" : 0.6,"EXTRA_PI_PULSES" : 0,"R_POWER_DB" : -30.0,"R_LENGTH_US" : 2.0,"R_OFFSET_US" : 0.495,"R_PHASE_DEG" : 0.0,"R_RELAX_US" : 20.0,"HARD_AVG" : 500,"SOFT_AVG" : 1,"REP" : 1000,"POPULATION" : False},
+        "settings": {"Q_FREQUENCY_MHZ" : 3950, "Q_GAIN" : 0.6,"EXTRA_PI_PULSES" : 0,"R_POWER_DB" : -30.0,"R_LENGTH_US" : 2.0,"R_OFFSET_US" : 0.5,"R_PHASE_DEG" : 0.0,"R_RELAX_US" : 20.0,"HARD_AVG" : 500,"SOFT_AVG" : 1,"REP" : 1000,"POPULATION" : False},
     },
     {
         "file": "08a_time_rabi.py",
         "label": "Time Rabi",
         "enabled": True,
-        "settings": {"Q_FREQUENCY_MHZ" : 5625, "Q_GAIN" : 0.5,"EXTRA_PI_PULSES" : 0,"R_POWER_DB" : -30.0,"R_LENGTH_US" : 2.0,"R_OFFSET_US" : 0.495,"R_PHASE_DEG" : 0.0,"R_RELAX_US" : 20.0,"HARD_AVG" : 500,"SOFT_AVG" : 1,"REP" : 1000,"POPULATION" : False},
+        "settings": {"Q_FREQUENCY_MHZ" : 5625, "Q_GAIN" : 0.5,"EXTRA_PI_PULSES" : 0,"R_POWER_DB" : -30.0,"R_LENGTH_US" : 2.0,"R_OFFSET_US" : 0.5,"R_PHASE_DEG" : 0.0,"R_RELAX_US" : 20.0,"HARD_AVG" : 500,"SOFT_AVG" : 1,"REP" : 1000,"POPULATION" : False},
     },
 ]
 

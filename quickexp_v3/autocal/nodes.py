@@ -2754,7 +2754,7 @@ def _n8(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
         experiment="rabi",
         preset="rabi_length",
         overrides={
-            "q_freq": float(ctx.working_value("defaults.q_freq", 5606.5)),
+            "q_freq": float(ctx.working_value("defaults.q_freq", 5600.0)),
             "q_gain": float(ctx.working_value("defaults.q_gain", 0.4)),
             "q_length": np.linspace(0.02, 1.67, 34),
             "hard_avg": _averaging_value(
@@ -2831,9 +2831,9 @@ def _n9(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
         preset="iq_blobs",
         overrides={
             "shots": shots,
-            "q_freq": float(ctx.working_value("defaults.q_freq", 5606.5)),
-            "q_length": float(ctx.working_value("defaults.q_length", 0.115)),
-            "r_freq": float(ctx.working_value("defaults.r_freq", 6883.11)),
+            "q_freq": float(ctx.working_value("defaults.q_freq", 5600.0)),
+            "q_length": float(ctx.working_value("defaults.q_length", 0.1)),
+            "r_freq": float(ctx.working_value("defaults.r_freq", 6884.0)),
             "r_power": float(ctx.working_value("defaults.r_power", -35.0)),
         },
     )
@@ -2938,8 +2938,8 @@ def _n11(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
         preset="t1",
         overrides={
             "delay": np.linspace(0.0, stop, 300),
-            "q_freq": float(ctx.working_value("defaults.q_freq", 5606.5)),
-            "q_length": float(ctx.working_value("defaults.q_length", 0.115)),
+            "q_freq": float(ctx.working_value("defaults.q_freq", 5600.0)),
+            "q_length": float(ctx.working_value("defaults.q_length", 0.1)),
             "hard_avg": _averaging_value(ctx, "t1", attempt),
         },
         run_options={"population": False},
@@ -3015,7 +3015,7 @@ def _ramsey_record(fit: Any, *, value: float, analysis: str) -> dict:
 
 
 def _n12(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
-    working = float(ctx.working_value("defaults.q_freq", 5606.5))
+    working = float(ctx.working_value("defaults.q_freq", 5600.0))
     drives = (working + 0.5, working + 1.5)
     fits = []
     csv_paths = []
@@ -3029,8 +3029,8 @@ def _n12(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
                 "q_freq": drive,
                 "fringe_frequency_mhz": 5.0,
                 "delay": np.linspace(0.0, 4.99, 500),
-                "q_length": float(ctx.working_value("defaults.q_length", 0.115)),
-                "q_length_2": float(ctx.working_value("defaults.q_length", 0.115)),
+                "q_length": float(ctx.working_value("defaults.q_length", 0.1)),
+                "q_length_2": float(ctx.working_value("defaults.q_length", 0.1)),
                 "hard_avg": _averaging_value(ctx, "ramsey", attempt),
             },
             run_options={"population": False},
@@ -3118,9 +3118,9 @@ def _n13(ctx: SessionContext, spec: NodeSpec, attempt: int) -> NodeOutcome:
         overrides={
             "delay": np.linspace(0.0, stop, 99),
             "pulse_count": 0,
-            "q_freq": float(ctx.working_value("defaults.q_freq", 5606.5)),
-            "q_length": float(ctx.working_value("defaults.q_length", 0.115)),
-            "q_length_2": float(ctx.working_value("defaults.q_length", 0.115)),
+            "q_freq": float(ctx.working_value("defaults.q_freq", 5600.0)),
+            "q_length": float(ctx.working_value("defaults.q_length", 0.1)),
+            "q_length_2": float(ctx.working_value("defaults.q_length", 0.1)),
             "hard_avg": _averaging_value(ctx, "echo", attempt),
         },
         run_options={"population": False},
