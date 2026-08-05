@@ -41,6 +41,7 @@ python -m pytest -q
 | `06b_qubit_spectroscopy_vs_flux.py`        | qubit spectroscopy versus Z                                               |
 | `06c_qubit_spectroscopy_vs_gain.py`        | gain-by-frequency power spectroscopy                                      |
 | `06f_qubit_spectroscopy_zpa.py`            | authored native frequency-by-Z map (simulation until hardware gates pass) |
+| `06g_design_qubit_sweep_path.py`           | design a row-dependent sweep path from a prior two-axis map               |
 | `07a_rabi_chevron_duration.py`             | frequency-by-duration Rabi chevron                                        |
 | `07b_rabi_chevron_amplitude.py`            | frequency-by-gain Rabi chevron                                            |
 | `08a_time_rabi.py`                         | pulse-duration Rabi                                                       |

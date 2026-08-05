@@ -21,6 +21,7 @@ EXPECTED = [
     "06d_fit_qubit_spectroscopy.py",
     "06e_fit_qubit_vs_flux.py",
     "06f_qubit_spectroscopy_zpa.py",
+    "06g_design_qubit_sweep_path.py",
     "07a_rabi_chevron_duration.py",
     "07b_rabi_chevron_amplitude.py",
     "07c_fit_rabi_chevron.py",

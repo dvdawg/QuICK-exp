@@ -333,6 +333,311 @@ def run_experiment(
     return completed
 
 
+def run_sweep_path(
+    project_root: Path,
+    *,
+    path: Any,
+    experiment: str,
+    preset: str,
+    overrides: Optional[Mapping[str, Any]] = None,
+    row_overrides: Optional[Callable[[float], Mapping[str, Any]]] = None,
+    row_override_metadata: Optional[Mapping[str, Any]] = None,
+    run_options: Optional[Mapping[str, Any]] = None,
+    title: Optional[str] = None,
+    live_hardware: bool = False,
+    fixed_z_gain: Optional[float] = None,
+    flux_line: str = "z_rf",
+    outer_control: str = "program",
+    analyze_rows: bool = False,
+    show_plot: bool = True,
+    seed: int = 7,
+    backend: Any = None,
+) -> list:
+    """Acquire and combine a generic row-dependent two-axis sweep path."""
+    outer_name = str(path.outer_name)
+    inner_name = str(path.inner_name)
+    resolved_outer_control = str(outer_control).strip().lower()
+    if resolved_outer_control not in {"program", "held_flux"}:
+        raise ValueError("outer_control must be 'program' or 'held_flux'")
+    if resolved_outer_control == "held_flux" and outer_name != "z_gain":
+        raise ValueError("held_flux outer control requires a z_gain path")
+    if fixed_z_gain is not None and outer_name == "z_gain":
+        raise ValueError("fixed_z_gain cannot be combined with a z_gain path")
+    outer_values = np.asarray(path.outer_values, dtype=float)
+    inner_rows = tuple(np.asarray(row, dtype=float) for row in path.inner_sweeps())
+    if len(inner_rows) != outer_values.size or any(row.size < 2 for row in inner_rows):
+        raise ValueError("sweep path must provide at least two inner values per row")
+
+    repository = load_repository(project_root)
+    base_overrides = deepcopy(dict(overrides or {}))
+    if fixed_z_gain is not None:
+        base_overrides["z_gain"] = float(fixed_z_gain)
+    resolved_rows = []
+    extra_rows = []
+    for outer_value, inner_values in zip(outer_values, inner_rows):
+        extra = {} if row_overrides is None else row_overrides(float(outer_value))
+        if not isinstance(extra, Mapping):
+            raise ValueError("row_overrides must return a mapping for every row")
+        extra = deepcopy(dict(extra))
+        overlap = {outer_name, inner_name}.intersection(extra)
+        if overlap:
+            raise ValueError(
+                "row_overrides cannot replace path axes: "
+                + ", ".join(sorted(overlap))
+            )
+        resolved = deepcopy(base_overrides)
+        resolved.update(extra)
+        resolved[outer_name] = float(outer_value)
+        resolved[inner_name] = inner_values.copy()
+        extra_rows.append(extra)
+        resolved_rows.append(resolved)
+
+    connection = None
+    flux = None
+    if live_hardware:
+        if backend is not None:
+            raise ValueError("a custom backend cannot be supplied for live hardware")
+        connection = connect_quick(repository)
+        backend = connection.backend
+        try:
+            preflight_runner = ExperimentRunner(repository, backend)
+            initial = preflight_runner.plan(
+                experiment,
+                preset,
+                overrides=resolved_rows[0],
+                run_options=run_options,
+                title=title,
+            )
+            validate = getattr(backend, "validate", None)
+            details = validate(initial.plan) if callable(validate) else None
+            _print_envelope_preflight(details)
+            if fixed_z_gain is not None or resolved_outer_control == "held_flux":
+                flux = make_held_flux_controller(
+                    connection,
+                    repository,
+                    initial.config.expanded_parameters(),
+                    line_name=flux_line,
+                )
+                if fixed_z_gain is not None:
+                    flux.set(float(fixed_z_gain))
+        except BaseException:
+            if flux is not None:
+                try:
+                    flux.park()
+                except BaseException:
+                    pass
+            try:
+                backend.close()
+            except BaseException:
+                pass
+            raise
+    else:
+        print("SIMULATION: LIVE_HARDWARE=False")
+        print_offline_channel_expectation(repository)
+        backend = backend if backend is not None else SyntheticBackend(seed=seed)
+
+    runner = ExperimentRunner(repository, backend, flux=flux)
+    combined_title = title or f"{preset}_path"
+    native_saver = None
+    native_files = []
+    original_data_path = getattr(backend, "data_path", None)
+
+    completed_rows = []
+    try:
+        if live_hardware and connection is not None and original_data_path:
+            preview = runner.plan(
+                experiment,
+                preset,
+                overrides=resolved_rows[0],
+                run_options=run_options,
+                title=combined_title,
+            )
+            if tuple(preview.plan.axes) != (inner_name,):
+                raise ValueError(
+                    "run_sweep_path requires the path inner parameter to be "
+                    "the only Quick sweep axis in each row"
+                )
+            independent = [
+                (
+                    path.outer_label or outer_name,
+                    path.outer_unit or preview.plan.axis_units.get(outer_name, ""),
+                ),
+                (
+                    path.inner_label or inner_name,
+                    path.inner_unit or preview.plan.axis_units.get(inner_name, ""),
+                ),
+            ]
+            signal_labels = {
+                "population": "Population",
+                "amplitude": "Amplitude",
+                "phase": "Phase",
+                "i": "I",
+                "q": "Q",
+            }
+            dependent = [
+                (
+                    signal_labels.get(name, name),
+                    preview.plan.signal_units.get(name, ""),
+                )
+                for name in preview.plan.signal_names
+            ]
+            parameters = to_builtin(dict(preview.plan.variables))
+            parameters["preset"] = preset
+            parameters["sweep_path"] = path.as_dict()
+            parameters["outer_control"] = resolved_outer_control
+            if fixed_z_gain is not None:
+                parameters["fixed_z_gain"] = float(fixed_z_gain)
+            if row_overrides is not None:
+                parameters["row_overrides_by_outer"] = [
+                    {
+                        outer_name: float(outer_values[index]),
+                        **to_builtin(extra),
+                    }
+                    for index, extra in enumerate(extra_rows)
+                ]
+            if row_override_metadata is not None:
+                parameters["row_override_calibration"] = to_builtin(
+                    row_override_metadata
+                )
+            native_saver = connection.quick.Saver(
+                combined_title,
+                original_data_path,
+                indep_params=independent,
+                dep_params=dependent,
+                params=parameters,
+            )
+            native_files = [
+                native_saver.file_name + ".csv",
+                native_saver.file_name + ".yml",
+            ]
+            # Each row is acquired by Quick, but only the combined Saver writes
+            # files so a non-rectangular path remains one CSV/YML pair.
+            backend.data_path = None
+
+        if live_hardware and connection is not None:
+            progress = connection.quick.Sweep(
+                {outer_name: float(outer_values[0])},
+                {outer_name: outer_values},
+                progressBar=True,
+            )
+            row_values = (float(state[outer_name]) for state in progress)
+        else:
+            try:
+                from tqdm.auto import tqdm
+
+                row_values = tqdm(
+                    outer_values,
+                    desc=f"{outer_name} path",
+                    unit="row",
+                )
+            except ImportError:
+                row_values = outer_values
+
+        for row_index, outer_value in enumerate(row_values):
+            outer_value = float(outer_value)
+            if flux is not None and resolved_outer_control == "held_flux":
+                flux.set(outer_value)
+            completed = runner.run(
+                experiment,
+                preset,
+                overrides=resolved_rows[row_index],
+                run_options=run_options,
+                title=combined_title,
+                analyze=analyze_rows,
+                close_backend=False,
+                park_flux_on_exit=False,
+            )
+            completed_rows.append(completed)
+            if native_saver is not None:
+                if tuple(completed.data.axes) != (inner_name,):
+                    raise ValueError(
+                        f"acquired path row did not return the {inner_name!r} axis"
+                    )
+                inner_axis = np.asarray(
+                    completed.data.axes[inner_name],
+                    dtype=float,
+                )
+                columns = [
+                    np.full(inner_axis.shape, outer_value, dtype=float),
+                    inner_axis,
+                ]
+                columns.extend(
+                    np.asarray(signal, dtype=float)
+                    for signal in completed.data.signals.values()
+                )
+                native_saver.write_data(np.column_stack(columns))
+    finally:
+        if native_saver is not None and native_saver.has_data:
+            native_saver.write_yml()
+        if original_data_path is not None:
+            backend.data_path = original_data_path
+        if flux is not None:
+            flux.park()
+        backend.close()
+
+    if native_files:
+        for row in completed_rows:
+            row.data.metadata["native_files"] = list(native_files)
+        print("Quick native sweep-path files:")
+        for native_file in native_files:
+            print(f"  {native_file}")
+
+    if completed_rows:
+        acquired_inner = [
+            np.asarray(row.data.axes[inner_name], dtype=float)
+            for row in completed_rows
+        ]
+        amplitudes = [
+            np.asarray(
+                row.data.signals.get("amplitude", np.abs(row.data.iq)),
+                dtype=float,
+            )
+            for row in completed_rows
+        ]
+        figure, plot = plt.subplots(figsize=(8, 5), constrained_layout=True)
+        lengths = {row.size for row in acquired_inner}
+        if len(lengths) == 1:
+            plot_x = np.vstack(acquired_inner)
+            plot_y = np.broadcast_to(outer_values[:, None], plot_x.shape)
+            artist = plot.pcolormesh(
+                plot_x,
+                plot_y,
+                np.vstack(amplitudes),
+                shading="auto",
+            )
+        else:
+            plot_x = np.concatenate(acquired_inner)
+            plot_y = np.concatenate(
+                [
+                    np.full(row.shape, outer_values[index], dtype=float)
+                    for index, row in enumerate(acquired_inner)
+                ]
+            )
+            artist = plot.scatter(
+                plot_x,
+                plot_y,
+                c=np.concatenate(amplitudes),
+                marker="s",
+                s=14,
+                linewidths=0,
+            )
+        inner_label = path.inner_label or inner_name
+        if path.inner_unit:
+            inner_label += f" ({path.inner_unit})"
+        outer_label = path.outer_label or outer_name
+        if path.outer_unit:
+            outer_label += f" ({path.outer_unit})"
+        plot.set(
+            xlabel=inner_label,
+            ylabel=outer_label,
+            title=combined_title,
+        )
+        figure.colorbar(artist, ax=plot, label="Amplitude")
+        if show_plot:
+            plt.show()
+    return completed_rows
+
+
 def resonator_frequency_from_flux(
     repository: ConfigRepository,
     z_gain: Any,
@@ -390,6 +695,7 @@ def run_flux_sweep(
     title: Optional[str] = None,
     live_hardware: bool = False,
     flux_line: str = "z_rf",
+    use_held_flux_controller: bool = True,
     readout_frequency: Optional[Callable[[float], float]] = None,
     readout_metadata: Optional[Mapping[str, Any]] = None,
     row_overrides: Optional[Callable[[float], Mapping[str, Any]]] = None,
@@ -465,12 +771,13 @@ def run_flux_sweep(
                 validate(initial.plan) if callable(validate) else None
             )
             _print_envelope_preflight(preflight_details)
-            flux = make_held_flux_controller(
-                connection,
-                repository,
-                initial.config.expanded_parameters(),
-                line_name=flux_line,
-            )
+            if use_held_flux_controller:
+                flux = make_held_flux_controller(
+                    connection,
+                    repository,
+                    initial.config.expanded_parameters(),
+                    line_name=flux_line,
+                )
         except BaseException:
             try:
                 backend.close()
@@ -532,6 +839,11 @@ def run_flux_sweep(
         parameters = to_builtin(dict(preview.plan.variables))
         parameters["preset"] = preset
         parameters["z_gain_sweep"] = values.tolist()
+        parameters["z_gain_control"] = (
+            "held_flux_controller"
+            if use_held_flux_controller
+            else "experiment_program"
+        )
         if readout_values is not None:
             parameters["r_freq_by_z"] = readout_values.tolist()
         if readout_metadata is not None:

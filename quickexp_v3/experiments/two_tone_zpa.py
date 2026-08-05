@@ -30,9 +30,10 @@ class TwoToneZPA(Experiment):
 
     def build(self, config):
         plan = super().build(config)
-        if set(plan.axes) != {"q_freq", "z_gain"}:
+        if set(plan.axes) not in ({"q_freq", "z_gain"}, {"q_freq"}):
             raise ConfigError(
-                "two_tone_zpa requires native q_freq and z_gain sweeps"
+                "two_tone_zpa requires a q_freq sweep and either a scalar "
+                "or swept z_gain"
             )
         return replace(
             plan,

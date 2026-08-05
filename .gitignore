@@ -17,3 +17,4 @@ docs/
 docs/*
 !docs/autocal-baseline.md
 !docs/AUTOCAL.md
+!docs/FLUX_COMPENSATION.md
