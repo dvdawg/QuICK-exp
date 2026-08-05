@@ -23,6 +23,12 @@ LIVE_HARDWARE = False
 INPUT_CSV = None
 EC_MHZ = 180.0
 USE_RESONATOR_PERIOD_HINT = True
+# None uses the full acquired frequency axis. Bounds are inclusive and may be
+# entered in either order. Example: (4500.0, 4800.0).
+FIT_FREQUENCY_WINDOW_MHZ = None
+# None uses every acquired flux row. Values are Z-gain units and bounds are
+# inclusive. Example: (-0.25, 0.15).
+FIT_FLUX_WINDOW_Z = None
 MINIMUM_RIDGE_ROWS = 6
 MINIMUM_R_SQUARED = 0.95
 MAXIMUM_RMSE_MHZ = 5.0
@@ -64,6 +70,8 @@ def main():
         _input_path(),
         ec_mhz=EC_MHZ,
         period_hint=_period_hint(),
+        frequency_window_mhz=FIT_FREQUENCY_WINDOW_MHZ,
+        flux_window_z=FIT_FLUX_WINDOW_Z,
     )
     passes = fit.passes(
         minimum_ridge_rows=MINIMUM_RIDGE_ROWS,
@@ -71,6 +79,11 @@ def main():
         maximum_rmse_mhz=MAXIMUM_RMSE_MHZ,
     )
     print(f"Fit source: {fit.source_csv}")
+    print(
+        f"Fit window: frequency [{fit.frequencies_mhz.min():.6f}, "
+        f"{fit.frequencies_mhz.max():.6f}] MHz; flux "
+        f"[{fit.map_z_gain.min():+.6g}, {fit.map_z_gain.max():+.6g}] Z"
+    )
     print(
         f"Ridge rows: {len(fit.ridge_rows)}; "
         f"R^2={fit.statistics['r_squared']:.6f}; "

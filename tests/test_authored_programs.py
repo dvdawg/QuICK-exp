@@ -65,6 +65,25 @@ def test_authored_program_plans_preflight_and_decode_synthetic_maps():
     assert t1_data.points == 9 * 61
 
 
+def test_two_tone_zpa_accepts_one_frequency_row_at_scalar_z():
+    repo = repository()
+    spectroscopy = get("two_tone_zpa")
+    plan = spectroscopy.build(
+        repo.resolve(
+            "two_tone_zpa",
+            overrides={
+                "z_gain": 0.125,
+                "q_freq": np.linspace(4750.0, 4770.0, 21),
+            },
+        )
+    )
+
+    assert plan.axes == ("q_freq",)
+    assert plan.variables["z_gain"] == 0.125
+    decoded = spectroscopy.decode(plan, SyntheticBackend(seed=12).acquire(plan))
+    assert decoded.points == 21
+
+
 def test_program_registration_rejects_config_override_collisions():
     with pytest.raises(ConfigError, match="collide.*rep"):
         register_program_variables("BadAuthoredProgram", {"q_freq", "rep"})

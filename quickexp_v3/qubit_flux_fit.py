@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -65,6 +65,7 @@ class RidgeRow:
 class QubitFluxFit:
     source_csv: Path
     z_gain: np.ndarray
+    map_z_gain: np.ndarray
     frequencies_mhz: np.ndarray
     signal_map: np.ndarray
     ridge_rows: tuple
@@ -129,6 +130,37 @@ def _extract_row(
     uncertainty = float(errors[3])
     contrast = abs(float(values[2])) / max(rmse, np.finfo(float).eps)
     return center, uncertainty, r_squared(y, fitted), contrast, projected
+
+
+def _fit_window_mask(
+    values: np.ndarray,
+    window: Optional[Sequence[float]],
+    *,
+    label: str,
+    minimum_points: int,
+) -> np.ndarray:
+    """Return an inclusive, validated mask for one fit axis."""
+    mask = np.ones(values.shape, dtype=bool)
+    if window is None:
+        return mask
+    try:
+        if len(window) != 2:
+            raise AnalysisError(f"{label} fit window must have two values")
+        lower, upper = sorted(float(value) for value in window)
+    except (TypeError, ValueError) as error:
+        raise AnalysisError(
+            f"{label} fit window must contain two finite numeric values"
+        ) from error
+    if not np.isfinite(lower) or not np.isfinite(upper):
+        raise AnalysisError(
+            f"{label} fit window must contain two finite numeric values"
+        )
+    mask = (values >= lower) & (values <= upper)
+    if np.count_nonzero(mask) < minimum_points:
+        raise AnalysisError(
+            f"{label} fit window contains fewer than {minimum_points} points"
+        )
+    return mask
 
 
 def fit_transmon_flux(
@@ -276,17 +308,36 @@ def fit_qubit_flux(
     *,
     ec_mhz: float = 180.0,
     period_hint: Optional[float] = None,
+    frequency_window_mhz: Optional[Sequence[float]] = None,
+    flux_window_z: Optional[Sequence[float]] = None,
     minimum_row_r_squared: float = 0.05,
     minimum_row_contrast_snr: float = 1.0,
 ) -> QubitFluxFit:
     native = load_native_map(csv_path)
     if "z" not in native.outer_label.lower() or "freq" not in native.inner_label.lower():
         raise AnalysisError("qubit flux fitting requires Z as outer and frequency as inner axis")
-    iq_map = native.complex_signal
+    frequency_mask = _fit_window_mask(
+        native.inner,
+        frequency_window_mhz,
+        label="frequency",
+        minimum_points=12,
+    )
+    flux_mask = _fit_window_mask(
+        native.outer,
+        flux_window_z,
+        label="flux",
+        minimum_points=4,
+    )
+    frequencies = native.inner[frequency_mask]
+    map_z_gain = native.outer[flux_mask]
+    iq_map = native.complex_signal[flux_mask][:, frequency_mask]
+    signal_map = np.asarray(native.signals.get("amplitude"))[flux_mask][
+        :, frequency_mask
+    ]
     ridge_rows = []
     projected_rows = []
-    for row_index, z_value in enumerate(native.outer):
-        extracted = _extract_row(native.inner, iq_map[row_index])
+    for row_index, z_value in enumerate(map_z_gain):
+        extracted = _extract_row(frequencies, iq_map[row_index])
         if extracted is None:
             continue
         center, uncertainty, row_r2, contrast, projected = extracted
@@ -317,12 +368,21 @@ def fit_qubit_flux(
         **statistics,
         "ridge_rows": len(ridge_rows),
         "ec_source": "hardware.q_delta" if ec_mhz == 180.0 else "explicit",
+        "frequency_fit_window_mhz": [
+            float(np.min(frequencies)),
+            float(np.max(frequencies)),
+        ],
+        "flux_fit_window_z": [
+            float(np.min(map_z_gain)),
+            float(np.max(map_z_gain)),
+        ],
     }
     return QubitFluxFit(
         source_csv=native.source_csv,
         z_gain=z_values,
-        frequencies_mhz=native.inner,
-        signal_map=np.asarray(native.signals.get("amplitude")),
+        map_z_gain=map_z_gain,
+        frequencies_mhz=frequencies,
+        signal_map=signal_map,
         ridge_rows=tuple(ridge_rows),
         fitted_frequencies_mhz=fitted,
         parameters=parameters,
@@ -336,7 +396,7 @@ def plot_qubit_flux_fit(fit: QubitFluxFit):
     figure, axes = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
     mesh = axes[0].pcolormesh(
         fit.frequencies_mhz,
-        np.asarray(fit.metadata.get("parameters", {}).get("z_gain_sweep", fit.z_gain)),
+        fit.map_z_gain,
         fit.signal_map,
         shading="auto",
     )

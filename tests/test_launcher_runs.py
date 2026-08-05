@@ -253,6 +253,28 @@ def write_extended_fit_fixtures(data_directory):
         var={"q_delta": -180.0},
     )
 
+    q_gain = np.linspace(0.02, 0.4, 9)
+    gain_frequencies = np.linspace(4550.0, 4650.0, 201)
+    gain_ridge = 4590.0 + 35.0 * q_gain
+    gain_signal = [
+        0.1 + 0.9 / (1.0 + ((gain_frequencies - center) / 3.0) ** 2)
+        for center in gain_ridge
+    ]
+    qubit_gain = write_native_map(
+        data_directory / "00011b - QubitSpecVsQGain.csv",
+        q_gain,
+        gain_frequencies,
+        gain_signal,
+        quick_class="QubitSpectroscopy",
+        labels=(
+            "Qubit Pulse Gain",
+            "a.u.",
+            "Qubit Pulse Frequency",
+            "MHz",
+        ),
+        var={"z_gain": -0.18},
+    )
+
     drive_frequencies = np.linspace(5598.0, 5602.0, 9)
     time = np.linspace(0.0, 3.0, 121)
     rabi_rates = np.sqrt(1.2**2 + (drive_frequencies - 5600.0) ** 2)
@@ -377,6 +399,7 @@ def write_extended_fit_fixtures(data_directory):
     return {
         "05f_fit_punchout.py": punchout,
         "06e_fit_qubit_vs_flux.py": qubit_flux,
+        "06g_design_qubit_sweep_path.py": qubit_flux,
         "07c_fit_rabi_chevron.py": rabi_chevron,
         "09b_fit_iq_blobs.py": iq_path,
         "10b_fit_readout_optimization.py": dispersive,
@@ -409,9 +432,22 @@ def test_every_numbered_file_runs_to_completion_offline(tmp_path):
             module_globals["SHOW_PLOT"] = False
         if "SHOTS" in module_globals:
             module_globals["SHOTS"] = 40
+        if "SWEEP_PATH_YML" in module_globals:
+            module_globals["SWEEP_PATH_YML"] = None
         if filename in native_fit_fixtures:
             module_globals["INPUT_CSV"] = native_fit_fixtures[filename]
             module_globals["WRITE_ACCEPTED_FIT"] = False
+        if filename in {
+            "06e_fit_qubit_vs_flux.py",
+            "06g_design_qubit_sweep_path.py",
+        }:
+            module_globals["FIT_FREQUENCY_WINDOW_MHZ"] = None
+        if filename == "06e_fit_qubit_vs_flux.py":
+            module_globals["FIT_FLUX_WINDOW_Z"] = None
+        if filename == "06g_design_qubit_sweep_path.py":
+            module_globals["PATH_METHOD"] = "fit_margin"
+            module_globals["OUTPUT_YML"] = tmp_path / "analysis_cache/path.yml"
+            module_globals["SHOW_PREVIEW"] = False
         if filename in extended_fit_fixtures:
             module_globals["INPUT_CSV"] = extended_fit_fixtures[filename]
             if "WRITE_ACCEPTED_FIT" in module_globals:

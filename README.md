@@ -39,6 +39,7 @@ python -m pytest -q
 | `06b_qubit_spectroscopy_vs_flux.py`        | qubit spectroscopy versus Z                                               |
 | `06c_qubit_spectroscopy_vs_gain.py`        | gain-by-frequency power spectroscopy                                      |
 | `06f_qubit_spectroscopy_zpa.py`            | authored native frequency-by-Z map (simulation until hardware gates pass) |
+| `06g_design_qubit_sweep_path.py`           | design a row-dependent sweep path from a prior two-axis map               |
 | `07a_rabi_chevron_duration.py`             | frequency-by-duration Rabi chevron                                        |
 | `07b_rabi_chevron_amplitude.py`            | frequency-by-gain Rabi chevron                                            |
 | `08a_time_rabi.py`                         | pulse-duration Rabi                                                       |
@@ -105,6 +106,54 @@ FORCE_WRITE = True
 ```
 
 After using the write latches, it is always good practice to set them back to `FALSE` and save to avoid accidental writes.
+
+In `06e_fit_qubit_vs_flux.py`, the frequency and flux axes can be restricted independently so a broad map can be fitted around one feature. `None` uses the full acquired axis, and bounds are inclusive:
+
+```python
+FIT_FREQUENCY_WINDOW_MHZ = (MIN_MHZ, MAX_MHZ)
+FIT_FLUX_WINDOW_Z = (MIN_Z_GAIN, MAX_Z_GAIN)
+```
+
+
+
+## Following a Feature with a Custom Sweep Path
+
+A rectangular scan spends most of its acquisition time far from the feature of interest. `06g_design_qubit_sweep_path.py` runs after a broad two-dimensional scan and stores one lower and upper inner-axis bound per selected outer-axis row, so a later run measures only the corridor containing the feature. It infers generic parameter names from the background axes; for a Z-by-qubit-frequency map it produces a `z_gain`/`q_freq` path that `06b` can run.
+
+Two design modes are available:
+
+```python
+# Fit the spectroscopy ridge and add a margin on both sides.
+PATH_METHOD = "fit_margin"
+FIT_MARGIN_MHZ = 10.0  # or (below_mhz, above_mhz)
+
+# Draw a polygon directly over the phase/amplitude map from the prior sweep.
+PATH_METHOD = "ui_polygon"
+BACKGROUND_SIGNAL = "phase"
+```
+
+In UI mode, click around the feature to close a polygon, inspect the white previewed region, then choose **Use region**. The prior sweep remains visible as the background throughout editing.
+
+Concave polygons are retained as one or more disjoint intervals at each outer row. If a vertical slice crosses two selected frequency bands with a gap between them, the saved path jumps between those bands; it does not sweep the unused frequencies inside the overall lower/upper envelope.
+
+By default each selected row keeps the frequency spacing of the background map, so narrow rows contain fewer points without changing the MHz resolution. To choose a different spacing:
+
+```python
+FREQUENCY_RESOLUTION_MHZ = None  # preserve the background resolution
+# FREQUENCY_RESOLUTION_MHZ = 0.5  # optional manual override
+```
+
+To acquire the saved path, point `06b_qubit_spectroscopy_vs_flux.py` at the YAML:
+
+```python
+SWEEP_PATH_YML = (
+    PROJECT_ROOT / "analysis_cache" / "qubit_flux_frequency_sweep_path.yml"
+)
+```
+
+`06b` then maps each saved `z_gain` through the held-flux controller, runs that row's saved `q_freq` values, and retains fitted readout-frequency tracking. All rows are still written as one native CSV/YML pair even though the path is not rectangular. Setting `SWEEP_PATH_YML = None` retains the original rectangular native sweep.
+
+At the library level, `SweepPath` and `run_sweep_path` are axis-generic: the YAML declares `outer.name` and `inner.name`, and the runner maps those names to the corresponding experiment overrides. Launcher-specific code only validates that a path contains axes appropriate for that experiment and selects any required physical outer-axis control, such as held flux for `z_gain`.
 
 ## Configuration and data
 
