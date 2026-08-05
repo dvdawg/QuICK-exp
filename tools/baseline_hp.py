@@ -1,4 +1,4 @@
-"""Score Phase 1 candidates and coverage on the legacy baseline zoo."""
+"""Score p1 candidates and coverage on the legacy baseline zoo."""
 
 from __future__ import annotations
 

@@ -15,5 +15,4 @@ plans/
 docs/
 !docs/
 docs/*
-!docs/autocal-baseline.md
 !docs/AUTOCAL.md

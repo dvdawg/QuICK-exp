@@ -2,7 +2,7 @@
 
 QuICK-exp is a superconducting-qubit measurement workflow with shared YAML configuration, port verification, calibration precedence, recovery, and held-flux safety.
 
-## First use
+## Startup
 
 1. Open `experiments/01_configure_experiment.py`, edit shared values such as
   `q_freq`, `r_freq`, the native data directory, connection, or logical
@@ -23,7 +23,7 @@ python -m pytest -q
 
 
 
-## Experimental order
+## Experiment Listing
 
 
 | File                                       | Purpose                                                                   |
@@ -59,10 +59,13 @@ python -m pytest -q
 | `95_device_report.py`                      | local calibration/trend/QC report                                         |
 
 
-The order is a suggested workflow. Adapt it to the device, firmware, and  
-calibration state in use.
+The order is a suggested workflow. Adapt it to the device, firmware, and calibration state in use.
 
 ## Fitting and Write Latches
+
+
+
+### Using Fitters
 
 Every fitter has the same `INPUT_CSV` setting:
 
@@ -82,7 +85,18 @@ INPUT_CSV = r"\\file-server\share\path\to\run.csv"
 
 When `INPUT_CSV = None`, two-dimensional files and files belonging to another Quick experiment class are ignored.
 
-All write latches default to `False`. First inspect the plotted fit, residuals, uncertainty, and printed quality gates. Then set:
+It's also useful to limit the axes that are used for fitting to avoid strange features or any other data that might distort the fit. Some fitters such as `06e_fit_qubit_vs_flux.py`, can restrict axes independently so a broad map can be fitted around one feature. `None` uses the full acquired axis, and bounds are inclusive:
+
+```python
+FIT_FREQUENCY_WINDOW_MHZ = (MIN_MHZ, MAX_MHZ)
+FIT_FLUX_WINDOW_Z = (MIN_Z_GAIN, MAX_Z_GAIN)
+```
+
+
+
+### Write Latches
+
+After fitting, it's useful to use the fitted model for future measurements (i.e. for resonator frequency vs flux dependence). All write latches default to `False`. First inspect the plotted fit, residuals, uncertainty, and printed quality gates. Then set:
 
 ```python
 WRITE_ACCEPTED_FIT = True
@@ -107,16 +121,9 @@ FORCE_WRITE = True
 
 After using the write latches, it is always good practice to set them back to `FALSE` and save to avoid accidental writes.
 
-In `06e_fit_qubit_vs_flux.py`, the frequency and flux axes can be restricted independently so a broad map can be fitted around one feature. `None` uses the full acquired axis, and bounds are inclusive:
+## Measurement Features
 
-```python
-FIT_FREQUENCY_WINDOW_MHZ = (MIN_MHZ, MAX_MHZ)
-FIT_FLUX_WINDOW_Z = (MIN_Z_GAIN, MAX_Z_GAIN)
-```
-
-
-
-## Following a Feature with a Custom Sweep Path
+### Following a Feature with a Custom Sweep Path
 
 A rectangular scan spends most of its acquisition time far from the feature of interest. `06g_design_qubit_sweep_path.py` runs after a broad two-dimensional scan and stores one lower and upper inner-axis bound per selected outer-axis row, so a later run measures only the corridor containing the feature. It infers generic parameter names from the background axes; for a Z-by-qubit-frequency map it produces a `z_gain`/`q_freq` path that `06b` can run.
 
@@ -155,56 +162,7 @@ SWEEP_PATH_YML = (
 
 At the library level, `SweepPath` and `run_sweep_path` are axis-generic: the YAML declares `outer.name` and `inner.name`, and the runner maps those names to the corresponding experiment overrides. Launcher-specific code only validates that a path contains axes appropriate for that experiment and selects any required physical outer-axis control, such as held flux for `z_gain`.
 
-## Configuration and data
-
-Settings resolve in this order:
-
-```text
-hardware defaults < accepted calibration < preset < launcher overrides
-```
-
-- `hardware.yml` contains the connection, routing, bounds, shared defaults, and
-native Quick output directory.
-- `calibration.yml` contains accepted values, history, provenance, and inert
-autocal proposals. Only accepted records participate in resolution. The 01
-editor updates accepted `r_freq`, `q_freq`, and `r_offset` records with their
-matching defaults so precedence stays intuitive.
-- `presets.yml` contains reusable experiment starting points.
-
-Live runs use only Quick's native numbered CSV/YML Saver. Ordinary run titles
-identify the experiment and relevant sweep parameters.
-
-Held-Z maps are combined into one native pair, for example
-`ResVsZ_held_bias.csv` or `QubitSpecVsZ_fitted_readout.csv`. No new
-`runs/.../manifest.json` or `raw.npz` tree is created. The existing `runs`
-directory is retained as legacy acquired data.
-
-Quick progress is enabled by `qick.show_progress: true`.
-`qick.progress_mode: terminal` is recommended for terminal or IDE
-execution; use `notebook` inside Jupyter. Each native `quick.Sweep` bar shows
-percentage, elapsed/estimated time, and iterations per second. Multi-Z scans
-use the same renderer for outer rows.
-
-Before a live run applies held Z, QuICK-exp checks Gaussian qubit-pulse memory against the connected generator's `f_fabric`, `samps_per_clk`, and `maxlen`. The check also accounts for the cumulative Gaussian envelopes used by T1, Ramsey, Echo, IQ Scatter, and Dispersive Spectroscopy.
-
-## Live hardware behavior
-
-Logical `r`, `q`, `rr`, and `z` roles and their generator, DAC, readout, and ADC
-indexes are installation-specific and configured in `hardware.yml`. Run
-`00_connect_and_ports.py` to verify that routing before acquisition.
-
-At zero Z, fixed-Z scripts use the generator reset performed during connection
-and skip the auxiliary acquisition. Nonzero fixed-Z scripts establish the held
-bias on the configured Z output using scalar settings independent of the main
-sweep. Connections, acquisitions, and closes clear persistent QICK streamer
-state so an interrupted process cannot affect the next sweep. A retry resets
-the configured generators and reapplies held Z. A normal exit attempts to
-return Z to zero bias; a lost hardware link can prevent parking.
-
-RF-board programming remains disabled until its attenuation and filter settings  
-have been reviewed for the active hardware and wiring.
-
-## Using the Measurement Queue
+### Using the Measurement Queue
 
 Open `90_measurement_queue.py`, list enabled files in `TASKS`, and run it. The default queue runs Time Rabi followed by Power Rabi. `SHOW_PLOT=False` lets the next task begin without waiting for a plot window to close. Each task still uses its own normal `main()`, Quick CSV/YML Saver, connection, flux parking, and cleanup. A task may override an `EDIT THESE` value without modifying the source:
 
@@ -217,5 +175,36 @@ Open `90_measurement_queue.py`, list enabled files in `TASKS`, and run it. The d
 }
 ```
 
-Duplicate files are allowed. `STOP_ON_ERROR=True` stops at the first failure;  
-set it to `False` to continue and receive a `completed_with_errors` summary.
+Duplicate files are allowed. `STOP_ON_ERROR=True` stops at the first failure; set it to `False` to continue and receive a `completed_with_errors` summary.
+
+## Configuration and data
+
+Settings resolve in this order:
+
+```text
+hardware defaults < accepted calibration < preset < launcher overrides
+```
+
+- `hardware.yml` contains the connection, routing, bounds, shared defaults, and native Quick output directory.
+- `calibration.yml` contains accepted values, history, provenance, and inert autocal proposals. Only accepted records participate in resolution. The 01 editor updates accepted `r_freq`, `q_freq`, and `r_offset` records with their matching defaults so precedence stays intuitive.
+- `presets.yml` contains reusable experiment starting points.
+
+Live runs use only Quick's native numbered CSV/YML Saver. Ordinary run titles identify the experiment and relevant sweep parameters.
+
+Held-Z maps are combined into one native pair, for example `ResVsZ_held_bias.csv` or `QubitSpecVsZ_fitted_readout.csv`. No new `runs/.../manifest.json` or `raw.npz` tree is created. The existing `runs` directory is retained as legacy acquired data.
+
+Quick progress is enabled by `qick.show_progress: true`. `qick.progress_mode: terminal` is recommended for terminal or IDE execution; use `notebook` inside Jupyter. Each native `quick.Sweep` bar shows percentage, elapsed/estimated time, and iterations per second. Multi-Z scans use the same renderer for outer rows.
+
+Before a live run applies held Z, QuICK-exp checks Gaussian qubit-pulse memory against the connected generator's `f_fabric`, `samps_per_clk`, and `maxlen`. The check also accounts for the cumulative Gaussian envelopes used by T1, Ramsey, Echo, IQ Scatter, and Dispersive Spectroscopy.
+
+## Live hardware behavior
+
+Logical `r`, `q`, `rr`, and `z` roles and their generator, DAC, readout, and ADC indexes are installation-specific and configured in `hardware.yml`. Run`00_connect_and_ports.py` to verify that routing before acquisition.
+
+At zero Z, fixed-Z scripts use the generator reset performed during connection and skip the auxiliary acquisition. Nonzero fixed-Z scripts establish the held bias on the configured Z output using scalar settings independent of the main sweep. Connections, acquisitions, and closes clear persistent QICK streamer state so an interrupted process cannot affect the next sweep. A retry resets the configured generators and reapplies held Z. A normal exit attempts to return Z to zero bias; a  lost hardware link can prevent parking.
+
+RF-board programming remains disabled until its attenuation and filter settings have been reviewed for the active hardware and wiring.
+
+## Autocal
+
+Currently, autocal is still in development and is not recommended for use.
