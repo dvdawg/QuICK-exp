@@ -125,7 +125,7 @@ After using the write latches, it is always good practice to set them back to `F
 
 ### Following a Feature with a Custom Sweep Path
 
-A rectangular scan spends most of its acquisition time far from the feature of interest. `06g_design_qubit_sweep_path.py` runs after a broad two-dimensional scan and stores one lower and upper inner-axis bound per selected outer-axis row, so a later run measures only the corridor containing the feature. It infers generic parameter names from the background axes; for a Z-by-qubit-frequency map it produces a `z_gain`/`q_freq` path that `06b` can run.
+A rectangular scan spends most of its acquisition time far from the feature of interest. `06g_design_qubit_sweep_path.py` runs after a broad two-dimensional scan and stores one or more selected inner-axis intervals per outer-axis row, so a later run measures only the corridor containing the feature. It infers generic parameter names from the background axes; for a Z-by-qubit-frequency map it produces a `z_gain`/`q_freq` path that `06b` can run.
 
 Two design modes are available:
 
@@ -159,6 +159,8 @@ SWEEP_PATH_YML = (
 ```
 
 `06b` then maps each saved `z_gain` through the held-flux controller, runs that row's saved `q_freq` values, and retains fitted readout-frequency tracking. All rows are still written as one native CSV/YML pair even though the path is not rectangular. Setting `SWEEP_PATH_YML = None` retains the original rectangular native sweep.
+
+Analyze either kind of result with `06e_fit_qubit_vs_flux.py`. With `INPUT_CSV = None`, it selects the latest `QubitSpecVsZ` run. Custom-path rows are kept at their acquired lengths and split at unswept gaps; the fitter finds several local candidates in each acquired band and selects one globally transmon-like ridge. The left plot displays the actual acquired points rather than filling the holes. Leave both fit-window settings at `None` to use every acquired point, or set either one to restrict the analysis further.
 
 At the library level, `SweepPath` and `run_sweep_path` are axis-generic: the YAML declares `outer.name` and `inner.name`, and the runner maps those names to the corresponding experiment overrides. Launcher-specific code only validates that a path contains axes appropriate for that experiment and selects any required physical outer-axis control, such as held flux for `z_gain`.
 
