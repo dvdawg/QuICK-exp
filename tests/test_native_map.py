@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import yaml
 
-from quickexp_v3.native_map import load_native_map
+from quickexp_v3.native_map import load_native_map, load_native_row_map
 
 
 REAL_ROOT = Path(
@@ -60,6 +60,17 @@ def test_native_map_loads_cartesian_and_combined_shapes(tmp_path):
     assert loaded.incomplete_outer.tolist() == [0.0]
     assert loaded.row_metadata["readout_frequency"].tolist() == [6799.0, 6801.0]
 
+    ragged = load_native_row_map(combined)
+    assert ragged.outer.tolist() == [-1.0, 0.0, 1.0]
+    assert ragged.point_counts.tolist() == [5, 4, 5]
+    assert ragged.inner_rows[1].tolist() == [10.0, 10.5, 11.5, 12.0]
+    assert ragged.complex_signal_rows[1].size == 4
+    assert ragged.row_metadata["readout_frequency"].tolist() == [
+        6799.0,
+        6800.0,
+        6801.0,
+    ]
+
 
 @pytest.mark.skipif(not REAL_ROOT.exists(), reason="local real-data mirror absent")
 def test_real_native_maps_have_verified_shapes():
@@ -74,4 +85,3 @@ def test_real_native_maps_have_verified_shapes():
     )
     assert qubit.signals["amplitude"].shape == (9, 3000)
     assert qubit.row_metadata["readout_frequency"].shape == (9,)
-

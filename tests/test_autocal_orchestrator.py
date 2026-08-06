@@ -86,7 +86,14 @@ def test_full_simulated_cold_start_completes_through_real_ide_path(tmp_path):
         tmp_path,
         replay_session=result.session_directory,
     )
-    assert len(replay.verified_fits) == 10
+    # One verified fit per fitting node, plus one for any node the coverage
+    # check legitimately retook. Pinning an exact total made this brittle: a
+    # narrower, more honest linewidth makes the resolution check ask for a
+    # finer sweep, which is the intended behaviour and adds a fit.
+    assert {
+        verification.node_id for verification in replay.verified_fits
+    } == {"N1", "N2", "N3", "N4", "N5", "N8", "N9", "N11", "N12", "N13"}
+    assert 10 <= len(replay.verified_fits) <= 12
     assert all(verification.matches for verification in replay.verified_fits)
 
 

@@ -27,6 +27,7 @@ from .native_fit import (
     fit_spectroscopy,
     load_native_trace,
 )
+from .spectroscopy_detect import detect_features
 from .trace_qc import qc_trace
 from .util import utc_now
 
@@ -49,15 +50,26 @@ def complex_notch_model(
     *,
     reference_mhz: Optional[float] = None,
 ) -> np.ndarray:
-    """Evaluate the eight-parameter complex notch model."""
+    """Evaluate the eight-parameter complex notch model.
+
+    ``reference_mhz`` fixes the frequency the baseline is expanded about. It
+    matters during fitting: expanding about the free ``center`` instead makes
+    the baseline slope, phase, and cable delay reparametrise every time the
+    centre moves, and that degeneracy is what drives the optimiser onto its
+    bounds and lets the centre slide to the edge of the sweep. It defaults to
+    the centre so that existing callers evaluating the model directly are
+    unaffected.
+    """
     frequency = np.asarray(frequency_mhz, dtype=float)
     values = np.asarray(parameters, dtype=float)
     if values.size != 8:
         raise AnalysisError("complex notch model requires eight parameters")
     center, linewidth, a0, a1, phi0, tau, coupling_re, coupling_im = values
+    reference = center if reference_mhz is None else float(reference_mhz)
     shifted = frequency - center
-    baseline = (a0 + a1 * shifted) * np.exp(
-        1j * (phi0 + tau * shifted)
+    from_reference = frequency - reference
+    baseline = (a0 + a1 * from_reference) * np.exp(
+        1j * (phi0 + tau * from_reference)
     )
     coupling = coupling_re + 1j * coupling_im
     return baseline * (1.0 - coupling / (1.0 + 2j * shifted / linewidth))
@@ -79,6 +91,53 @@ class NotchFit:
     def center_mhz(self) -> float:
         return float(self.parameters["center_mhz"])
 
+    def acceptance_gates(
+        self,
+        *,
+        minimum_r_squared: float = 0.90,
+        minimum_contrast_snr: float = 5.0,
+        minimum_edge_distance_over_fwhm: float = 1.0,
+    ) -> Mapping[str, tuple]:
+        """Each gate as ``(passed, measured, threshold)``."""
+        statistics = self.statistics
+        complex_r2 = float(statistics.get("r_squared_complex", float("nan")))
+        amplitude_r2 = float(
+            statistics.get("r_squared_amplitude", float("nan"))
+        )
+        return {
+            "r_squared_complex": (
+                bool(np.isfinite(complex_r2) and complex_r2 >= minimum_r_squared),
+                complex_r2,
+                float(minimum_r_squared),
+            ),
+            # Checked separately because the complex residual is dominated by
+            # the baseline and cable delay and stays near one even when the
+            # modelled magnitude is nonsense.
+            "r_squared_amplitude": (
+                bool(np.isfinite(amplitude_r2) and amplitude_r2 >= 0.0),
+                amplitude_r2,
+                0.0,
+            ),
+            "contrast_snr": (
+                bool(statistics["contrast_snr"] >= minimum_contrast_snr),
+                float(statistics["contrast_snr"]),
+                float(minimum_contrast_snr),
+            ),
+            "edge_distance_over_fwhm": (
+                bool(
+                    statistics["edge_distance_over_fwhm"]
+                    >= minimum_edge_distance_over_fwhm
+                ),
+                float(statistics["edge_distance_over_fwhm"]),
+                float(minimum_edge_distance_over_fwhm),
+            ),
+            "no_pinned_parameters": (
+                not statistics.get("pinned_parameters"),
+                len(statistics.get("pinned_parameters") or []),
+                0.0,
+            ),
+        }
+
     def passes(
         self,
         *,
@@ -86,13 +145,15 @@ class NotchFit:
         minimum_contrast_snr: float = 5.0,
         minimum_edge_distance_over_fwhm: float = 1.0,
     ) -> bool:
-        return bool(
-            np.isfinite(self.statistics.get("r_squared_complex", np.nan))
-            and self.statistics["r_squared_complex"] >= minimum_r_squared
-            and self.statistics["contrast_snr"] >= minimum_contrast_snr
-            and self.statistics["edge_distance_over_fwhm"]
-            >= minimum_edge_distance_over_fwhm
-            and not self.statistics.get("pinned_parameters")
+        return all(
+            gate[0]
+            for gate in self.acceptance_gates(
+                minimum_r_squared=minimum_r_squared,
+                minimum_contrast_snr=minimum_contrast_snr,
+                minimum_edge_distance_over_fwhm=(
+                    minimum_edge_distance_over_fwhm
+                ),
+            ).values()
         )
 
 
@@ -406,6 +467,14 @@ def fit_notch(csv_path: Path, *, allow_fallback: bool = True) -> NotchFit:
         fit = fit_complex_notch(csv_path)
         if fit.statistics["r_squared_complex"] < 0.75:
             raise AnalysisError("complex notch fit has implausibly low R-squared")
+        # The complex residual is dominated by the baseline and cable delay,
+        # so it stays near one even when the modelled magnitude is nonsense --
+        # observed at -232 while the complex R-squared read 0.98. Checking the
+        # magnitude separately is what catches that.
+        if fit.statistics["r_squared_amplitude"] < 0.0:
+            raise AnalysisError(
+                "complex notch fit reproduces the phase but not the magnitude"
+            )
         return fit
     except (AnalysisError, ValueError, FloatingPointError):
         if not allow_fallback:
@@ -550,7 +619,7 @@ def _seed_lorentz_hwhm(residual, index, step, span):
     return float(np.clip(width, minimum, max(abs(float(span)) / 4.0, minimum)))
 
 
-def _fit_lorentz_components(x, measured, components):
+def _fit_lorentz_components(x, measured, components, seed_centers=None):
     reference = float(np.mean(x))
     span = float(np.ptp(x))
     step = float(np.median(np.diff(x)))
@@ -560,8 +629,14 @@ def _fit_lorentz_components(x, measured, components):
     deviation = measured - (offset + slope * (x - reference))
     seeds = []
     residual = deviation.copy()
-    for _ in range(components):
-        index = int(np.argmax(np.abs(residual)))
+    provided = list(seed_centers or ())
+    for component in range(components):
+        if component < len(provided):
+            index = int(np.argmin(np.abs(x - float(provided[component]))))
+        else:
+            # Falls back to the largest residual only when the detector had
+            # nothing to offer; on a noisy trace that is a single sample.
+            index = int(np.argmax(np.abs(residual)))
         width = _seed_lorentz_hwhm(residual, index, step, span)
         seeds.extend([float(residual[index]), float(x[index]), width])
         residual = residual - seeds[-3] / (1.0 + ((x - seeds[-2]) / width) ** 2)
@@ -569,8 +644,10 @@ def _fit_lorentz_components(x, measured, components):
     lower = [-np.inf, -np.inf]
     upper = [np.inf, np.inf]
     for _ in range(components):
-        lower.extend([-np.inf, float(x[0]), max(step / 10.0, span * 1e-9)])
-        upper.extend([np.inf, float(x[-1]), 2.0 * span])
+        # A line narrower than the sampling is a spike on one sample, and one
+        # wider than the sweep is background wearing a Lorentzian's clothes.
+        lower.extend([-np.inf, float(x[0]), 0.75 * step])
+        upper.extend([np.inf, float(x[-1]), 0.25 * span])
     result = least_squares(
         lambda parameters: _lorentz_model(x, parameters, components, reference) - measured,
         initial,
@@ -602,10 +679,58 @@ class FeatureSpectroscopyFit:
     statistics: Mapping[str, Any]
     metadata: Mapping[str, Any]
     explicit_window: bool
+    #: Evidence from :mod:`quickexp_v3.spectroscopy_detect`; shared with
+    #: :class:`~quickexp_v3.native_fit.SpectroscopyFit` so one plotting path
+    #: serves both.
+    detection: Any = None
+    fit_mask: Optional[np.ndarray] = None
 
     @property
     def center_mhz(self) -> float:
         return float(self.parameters["center_mhz"])
+
+    def acceptance_gates(
+        self,
+        *,
+        minimum_r_squared: float,
+        minimum_contrast_snr: float,
+        maximum_center_uncertainty_fraction_of_fwhm: float,
+    ) -> Mapping[str, tuple]:
+        """Each gate as ``(passed, measured, threshold)``."""
+        statistics = self.statistics
+        return {
+            "r_squared": (
+                bool(statistics["r_squared"] >= minimum_r_squared),
+                float(statistics["r_squared"]),
+                float(minimum_r_squared),
+            ),
+            "contrast_snr": (
+                bool(statistics["contrast_snr"] >= minimum_contrast_snr),
+                float(statistics["contrast_snr"]),
+                float(minimum_contrast_snr),
+            ),
+            "center_uncertainty_fraction_of_fwhm": (
+                bool(
+                    statistics["center_uncertainty_fraction_of_fwhm"]
+                    <= maximum_center_uncertainty_fraction_of_fwhm
+                ),
+                float(statistics["center_uncertainty_fraction_of_fwhm"]),
+                float(maximum_center_uncertainty_fraction_of_fwhm),
+            ),
+            "no_pinned_parameters": (
+                not statistics.get("pinned_parameters"),
+                len(statistics.get("pinned_parameters") or []),
+                0.0,
+            ),
+            "single_feature_or_windowed": (
+                bool(
+                    not statistics.get("multi_feature")
+                    or self.explicit_window
+                ),
+                float(statistics.get("detected_candidates", 1)),
+                1.0,
+            ),
+        }
 
     def passes(
         self,
@@ -614,16 +739,15 @@ class FeatureSpectroscopyFit:
         minimum_contrast_snr: float,
         maximum_center_uncertainty_fraction_of_fwhm: float,
     ) -> bool:
-        return bool(
-            self.statistics["r_squared"] >= minimum_r_squared
-            and self.statistics["contrast_snr"] >= minimum_contrast_snr
-            and self.statistics["center_uncertainty_fraction_of_fwhm"]
-            <= maximum_center_uncertainty_fraction_of_fwhm
-            and not self.statistics.get("pinned_parameters")
-            and (
-                not self.statistics.get("multi_feature")
-                or self.explicit_window
-            )
+        return all(
+            gate[0]
+            for gate in self.acceptance_gates(
+                minimum_r_squared=minimum_r_squared,
+                minimum_contrast_snr=minimum_contrast_snr,
+                maximum_center_uncertainty_fraction_of_fwhm=(
+                    maximum_center_uncertainty_fraction_of_fwhm
+                ),
+            ).values()
         )
 
 
@@ -671,8 +795,35 @@ def fit_spectroscopy_features(
         rotation = {"angle_rad": float("nan"), "flipped": False}
         signal_name = "amplitude"
         signal_label = "Amplitude (a.u.)"
-    one = _fit_lorentz_components(x, measured, 1)
-    two = _fit_lorentz_components(x, measured, 2)
+    detection = detect_features(x, iq, kind=normalized_kind)
+    seeds = list(detection.candidates)
+    if not seeds:
+        # An explicit window is the operator asserting where to look, so it
+        # licenses fitting the best sub-threshold candidate; without one, a
+        # confident centre drawn from noise is worse than no answer at all.
+        if window_mhz is not None and detection.marginal:
+            seeds = list(detection.marginal[:3])
+        else:
+            detection.require_best()
+    leader = seeds[0]
+
+    # Fit near the strongest feature rather than across the whole sweep. The
+    # background is only straight locally, and over a full sweep a Lorentzian
+    # will happily widen until it becomes the background -- which is how this
+    # fitter used to report linewidths as wide as the trace.
+    step = float(np.median(np.diff(x)))
+    reach = max(10.0 * float(leader.hwhm_mhz), 20.0 * step)
+    inside = np.abs(x - float(leader.center_mhz)) <= reach
+    if np.count_nonzero(inside) >= 12:
+        x, iq, measured = x[inside], iq[inside], measured[inside]
+
+    seed_centers = [
+        candidate.center_mhz
+        for candidate in seeds
+        if float(x[0]) <= candidate.center_mhz <= float(x[-1])
+    ]
+    one = _fit_lorentz_components(x, measured, 1, seed_centers[:1])
+    two = _fit_lorentz_components(x, measured, 2, seed_centers[:2])
     rss_one = float(np.sum((measured - one[2]) ** 2))
     rss_two = float(np.sum((measured - two[2]) ** 2))
     delta_bic = bic(rss_one, x.size, 5) - bic(rss_two, x.size, 8)
@@ -689,7 +840,14 @@ def fit_spectroscopy_features(
         ),
     )
     two_feature_resolved = two_center_separation >= two_resolution_floor
-    use_two = bool(delta_bic > 10.0 and two_feature_resolved)
+    # A second component only counts when the detector independently found a
+    # second feature. A narrow line sitting on a broad pedestal improves the
+    # residual sum enormously by splitting into two displaced components, so
+    # the information criterion alone reports two features where there is one.
+    detected_candidates = len(detection.candidates)
+    use_two = bool(
+        delta_bic > 10.0 and two_feature_resolved and detected_candidates >= 2
+    )
     selected = two if use_two else one
     components = 2 if use_two else 1
     values, covariance, fitted, lower, upper = selected
@@ -710,6 +868,36 @@ def fit_spectroscopy_features(
         )
     features.sort(key=lambda feature: abs(feature["amplitude"]), reverse=True)
     primary = features[0]
+
+    # Features outside the local fit window are never seen by the component
+    # fit, but they remain real candidates the caller has to choose between.
+    # Carry the detector's view of them through, at its own resolution and
+    # ranked after everything actually fitted, so downstream adjudication
+    # still sees every option.
+    reference_channel = detection.channels[
+        "projection" if normalized_signal == "iq" else "amplitude"
+    ]
+    channel_noise = reference_channel.primary.noise
+    known = [feature["center_mhz"] for feature in features]
+    for candidate in detection.candidates:
+        if any(
+            abs(candidate.center_mhz - center)
+            <= max(candidate.hwhm_mhz, 2.0 * float(np.median(np.diff(x))))
+            for center in known
+        ):
+            continue
+        sign = 1.0 if candidate.polarity == "peak" else -1.0
+        features.append(
+            {
+                "amplitude": float(sign * candidate.prominence_snr * channel_noise),
+                "center_mhz": float(candidate.center_mhz),
+                "center_uncertainty_mhz": float(candidate.hwhm_mhz),
+                "hwhm_mhz": float(candidate.hwhm_mhz),
+                "feature_polarity": candidate.polarity,
+                "detected_only": True,
+            }
+        )
+        known.append(candidate.center_mhz)
     fwhm = 2.0 * primary["hwhm_mhz"]
     rmse = float(np.sqrt(np.mean((measured - fitted) ** 2)))
     names = [f"p{index}" for index in range(values.size)]
@@ -737,7 +925,15 @@ def fit_spectroscopy_features(
         "contrast_snr": abs(primary["amplitude"]) / max(rmse, np.finfo(float).eps),
         "center_uncertainty_fraction_of_fwhm": primary["center_uncertainty_mhz"] / fwhm,
         "edge_distance_mhz": min(primary["center_mhz"] - x[0], x[-1] - primary["center_mhz"]),
-        "multi_feature": components == 2,
+        # Warn whenever more than one credible feature exists anywhere in the
+        # sweep, not only when the local two-component model wins: a false
+        # warning costs a fit window, calibrating the wrong line costs more.
+        "multi_feature": bool(components == 2 or detected_candidates >= 2),
+        "detected_candidates": int(detected_candidates),
+        "detection_prominence_snr": float(leader.prominence_snr),
+        "detection_basis": leader.basis,
+        "detection_channel_snr": dict(leader.channel_snr),
+        "detection_geometry_score": float(leader.geometry_score),
         "delta_bic_two_vs_one": float(delta_bic),
         "two_feature_center_separation_mhz": float(
             two_center_separation
@@ -766,6 +962,7 @@ def fit_spectroscopy_features(
         statistics=statistics,
         metadata=trace.metadata,
         explicit_window=window_mhz is not None,
+        detection=detection,
     )
 
 

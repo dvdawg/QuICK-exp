@@ -15,6 +15,7 @@ import yaml
 from .analysis import rotate_iq
 from .errors import AnalysisError, ConfigError
 from .fit_calibration import annotate_forced_write, write_calibration_records
+from .spectroscopy_detect import detect_features, resonance_projection
 from .util import utc_now
 
 
@@ -323,6 +324,136 @@ def _spectral_model(
     )
 
 
+#: Half-width of the local fit window, in detected half-widths. Wide enough to
+#: pin the background and the Lorentzian wings, narrow enough that a straight
+#: background still describes it.
+FIT_WINDOW_IN_HWHM = 10.0
+
+#: Fitted amplitude over local residual scatter, above which a candidate is
+#: taken as confirmed and the remaining candidates are not tried.
+MINIMUM_FITTED_CONTRAST = 3.0
+
+
+def _fit_local_lorentzian(
+    x: np.ndarray,
+    measured: np.ndarray,
+    seed,
+    *,
+    step: float,
+    x_reference: float,
+):
+    """Fit one detected feature on a local window.
+
+    Fitting the whole trace forces a single straight line to describe a
+    background that curves and ripples, and the Lorentzian ends up absorbing
+    the mismatch -- which is how a fit reports a linewidth wider than the
+    sweep. Restricting to a neighbourhood of the detected feature keeps the
+    straight background honest.
+    """
+    reach = max(
+        FIT_WINDOW_IN_HWHM * float(seed.hwhm_mhz),
+        20.0 * abs(step),
+    )
+    mask = np.abs(x - float(seed.center_mhz)) <= reach
+    if np.count_nonzero(mask) < 9:
+        # Too few points nearby: widen to the smallest usable neighbourhood.
+        index = int(np.argmin(np.abs(x - float(seed.center_mhz))))
+        low = max(0, index - 6)
+        mask = np.zeros(x.size, dtype=bool)
+        mask[low : low + 13] = True
+    if np.count_nonzero(mask) < 9:
+        return None
+
+    window_x = x[mask]
+    window_y = measured[mask]
+    window_span = float(np.ptp(window_x))
+    if window_span <= 0:
+        return None
+
+    edge = max(2, min(20, window_x.size // 5))
+    edges = np.r_[:edge, window_x.size - edge : window_x.size]
+    slope_guess, offset_guess = np.polyfit(
+        window_x[edges] - x_reference,
+        window_y[edges],
+        1,
+    )
+    baseline = offset_guess + slope_guess * (window_x - x_reference)
+    amplitude_guess = float(
+        window_y[int(np.argmin(np.abs(window_x - float(seed.center_mhz))))]
+        - baseline[int(np.argmin(np.abs(window_x - float(seed.center_mhz))))]
+    )
+    if amplitude_guess == 0.0:
+        amplitude_guess = float(np.ptp(window_y)) or 1.0
+
+    # A resonance cannot be narrower than the sampling nor wider than the
+    # window it was found in. Without the lower bound the optimiser happily
+    # returns a delta function sitting on one noisy sample; without the upper
+    # bound it returns a "line" as wide as the sweep, which is background.
+    minimum_hwhm = 0.75 * abs(step)
+    maximum_hwhm = max(window_span / 2.0, minimum_hwhm * 2.0)
+
+    def model(values, offset, slope, amplitude, center, hwhm):
+        return _spectral_model(
+            values, offset, slope, amplitude, center, hwhm, x_reference
+        )
+
+    best = None
+    for width in np.unique(
+        np.clip(
+            np.asarray(
+                [
+                    float(seed.hwhm_mhz),
+                    0.5 * float(seed.hwhm_mhz),
+                    2.0 * float(seed.hwhm_mhz),
+                    2.0 * abs(step),
+                ]
+            ),
+            minimum_hwhm * 1.01,
+            maximum_hwhm * 0.99,
+        )
+    ):
+        try:
+            parameters, covariance = curve_fit(
+                model,
+                window_x,
+                window_y,
+                p0=[
+                    float(offset_guess),
+                    float(slope_guess),
+                    amplitude_guess,
+                    float(seed.center_mhz),
+                    float(width),
+                ],
+                bounds=(
+                    [
+                        -np.inf,
+                        -np.inf,
+                        -np.inf,
+                        float(window_x[0]),
+                        minimum_hwhm,
+                    ],
+                    [
+                        np.inf,
+                        np.inf,
+                        np.inf,
+                        float(window_x[-1]),
+                        maximum_hwhm,
+                    ],
+                ),
+                maxfev=100000,
+            )
+        except (RuntimeError, ValueError, FloatingPointError):
+            continue
+        predicted = model(window_x, *parameters)
+        squared_error = float(np.sum((window_y - predicted) ** 2))
+        if best is None or squared_error < best[0]:
+            best = (squared_error, parameters, covariance)
+    if best is None:
+        return None
+    _error, parameters, covariance = best
+    return mask, parameters, covariance, model(x, *parameters)
+
+
 @dataclass(frozen=True)
 class SpectroscopyFit:
     source_csv: Path
@@ -337,10 +468,74 @@ class SpectroscopyFit:
     parameters: Mapping[str, Any]
     statistics: Mapping[str, Any]
     metadata: Mapping[str, Any]
+    #: Points that entered the least squares. The feature is fitted on a local
+    #: window because a straight background is only a good description near
+    #: the line; the rest of the trace is retained for plotting.
+    fit_mask: Optional[np.ndarray] = None
+    #: Evidence from :mod:`quickexp_v3.spectroscopy_detect`, or None when an
+    #: explicit window bypassed detection.
+    detection: Any = None
 
     @property
     def center_mhz(self) -> float:
         return float(self.parameters["center_mhz"])
+
+    @property
+    def fit_x(self) -> np.ndarray:
+        return self.x if self.fit_mask is None else self.x[self.fit_mask]
+
+    def acceptance_gates(
+        self,
+        *,
+        minimum_r_squared: float,
+        minimum_contrast_snr: float,
+        maximum_center_uncertainty_fraction_of_fwhm: float,
+    ) -> Mapping[str, tuple]:
+        """Each gate as ``(passed, measured, threshold)``.
+
+        Reporting the measured value beside its threshold turns a bare
+        failure into something actionable: it says whether to average longer,
+        narrow the sweep, or re-centre it.
+        """
+        statistics = self.statistics
+        return {
+            "r_squared": (
+                bool(
+                    np.isfinite(statistics["r_squared"])
+                    and statistics["r_squared"] >= minimum_r_squared
+                ),
+                float(statistics["r_squared"]),
+                float(minimum_r_squared),
+            ),
+            "contrast_snr": (
+                bool(
+                    np.isfinite(statistics["contrast_snr"])
+                    and statistics["contrast_snr"] >= minimum_contrast_snr
+                ),
+                float(statistics["contrast_snr"]),
+                float(minimum_contrast_snr),
+            ),
+            "center_uncertainty_fraction_of_fwhm": (
+                bool(
+                    np.isfinite(
+                        statistics["center_uncertainty_fraction_of_fwhm"]
+                    )
+                    and statistics["center_uncertainty_fraction_of_fwhm"]
+                    <= maximum_center_uncertainty_fraction_of_fwhm
+                ),
+                float(statistics["center_uncertainty_fraction_of_fwhm"]),
+                float(maximum_center_uncertainty_fraction_of_fwhm),
+            ),
+            "center_inside_sweep": (
+                bool(
+                    float(np.min(self.x))
+                    < self.center_mhz
+                    < float(np.max(self.x))
+                ),
+                self.center_mhz,
+                float("nan"),
+            ),
+        }
 
     def passes(
         self,
@@ -349,21 +544,15 @@ class SpectroscopyFit:
         minimum_contrast_snr: float,
         maximum_center_uncertainty_fraction_of_fwhm: float,
     ) -> bool:
-        return bool(
-            np.isfinite(self.statistics["r_squared"])
-            and np.isfinite(self.statistics["contrast_snr"])
-            and np.isfinite(
-                self.statistics[
-                    "center_uncertainty_fraction_of_fwhm"
-                ]
-            )
-            and self.statistics["r_squared"] >= minimum_r_squared
-            and self.statistics["contrast_snr"] >= minimum_contrast_snr
-            and self.statistics[
-                "center_uncertainty_fraction_of_fwhm"
-            ]
-            <= maximum_center_uncertainty_fraction_of_fwhm
-            and float(np.min(self.x)) < self.center_mhz < float(np.max(self.x))
+        return all(
+            gate[0]
+            for gate in self.acceptance_gates(
+                minimum_r_squared=minimum_r_squared,
+                minimum_contrast_snr=minimum_contrast_snr,
+                maximum_center_uncertainty_fraction_of_fwhm=(
+                    maximum_center_uncertainty_fraction_of_fwhm
+                ),
+            ).values()
         )
 
 
@@ -404,99 +593,62 @@ def fit_spectroscopy(
     if span <= 0 or step <= 0:
         raise AnalysisError("spectroscopy axis must span a positive interval")
     x_reference = float(np.mean(x))
-    edge_count = max(2, min(20, len(x) // 5))
-    edge_indices = np.r_[:edge_count, len(x) - edge_count : len(x)]
-    slope_guess, intercept_guess = np.polyfit(
-        x[edge_indices] - x_reference,
-        measured[edge_indices],
-        1,
-    )
-    baseline = intercept_guess + slope_guess * (x - x_reference)
-    deviation = measured - baseline
-    ranked = np.argsort(np.abs(deviation))[::-1]
-    candidate_indices = []
-    for index in ranked:
-        if all(abs(int(index) - previous) >= 2 for previous in candidate_indices):
-            candidate_indices.append(int(index))
-        if len(candidate_indices) >= 8:
-            break
-    if not candidate_indices:
-        raise AnalysisError("spectroscopy feature could not be located")
 
-    minimum_hwhm = max(abs(step) / 10.0, span * 1e-9)
-    maximum_hwhm = span * 2.0
-    width_guesses = np.unique(
-        np.clip(
-            np.asarray(
-                [2.0 * abs(step), span / 50.0, span / 20.0, span / 10.0]
-            ),
-            minimum_hwhm * 1.01,
-            maximum_hwhm * 0.9,
+    detection = detect_features(x, iq, kind=normalized_kind)
+    if _normalize_signal(signal) == "IQ" and detection.best is not None:
+        # Project the de-delayed trace onto the direction the resonance moves
+        # it. On a wide resonator sweep the cable delay turns the I/Q point
+        # through tens of full revolutions, so the principal axis of the raw
+        # cloud is the delay itself and the projection is a sinusoid with the
+        # resonance buried in it.
+        measured, angle = resonance_projection(
+            x, detection.corrected, detection.best.center_mhz
         )
-    )
-    lower_bounds = [
-        -np.inf,
-        -np.inf,
-        -np.inf,
-        float(x[0]),
-        minimum_hwhm,
-    ]
-    upper_bounds = [
-        np.inf,
-        np.inf,
-        np.inf,
-        float(x[-1]),
-        maximum_hwhm,
-    ]
+        rotation = {"angle_rad": angle}
+        signal_label = "I/Q resonance-axis projection (a.u.)"
+    seeds = list(detection.candidates)
+    if not seeds:
+        # An explicit window is the operator asserting where to look, so it
+        # licenses fitting the best sub-threshold candidate; without one, a
+        # confident centre drawn from noise is worse than no answer at all.
+        if window_mhz is not None and detection.marginal:
+            seeds = list(detection.marginal[:3])
+        else:
+            detection.require_best()
 
-    def model(values, offset, slope, amplitude, center, hwhm):
-        return _spectral_model(
-            values,
-            offset,
-            slope,
-            amplitude,
-            center,
-            hwhm,
-            x_reference,
-        )
-
+    # Seeds arrive ranked by detection evidence, which is the quantity that
+    # was calibrated against noise. The fit's job is to refine and to reject,
+    # not to re-rank: scoring candidates by residual size instead would prefer
+    # a flat quiet stretch of trace over a strong, noisy line.
     best = None
-    for index in candidate_indices:
-        for width in width_guesses:
-            try:
-                parameters, covariance = curve_fit(
-                    model,
-                    x,
-                    measured,
-                    p0=[
-                        float(intercept_guess),
-                        float(slope_guess),
-                        float(deviation[index]),
-                        float(x[index]),
-                        float(width),
-                    ],
-                    bounds=(lower_bounds, upper_bounds),
-                    maxfev=100000,
-                )
-            except (RuntimeError, ValueError, FloatingPointError):
-                continue
-            fitted = model(x, *parameters)
-            squared_error = float(np.sum((measured - fitted) ** 2))
-            if best is None or squared_error < best[0]:
-                best = (
-                    squared_error,
-                    parameters,
-                    covariance,
-                    fitted,
-                )
+    for seed in seeds:
+        outcome = _fit_local_lorentzian(
+            x,
+            measured,
+            seed,
+            step=step,
+            x_reference=x_reference,
+        )
+        if outcome is None:
+            continue
+        fit_mask, parameters, covariance, fitted = outcome
+        residual = measured[fit_mask] - fitted[fit_mask]
+        local_rmse = float(np.sqrt(np.mean(residual**2)))
+        contrast = abs(float(parameters[2])) / max(local_rmse, np.finfo(float).eps)
+        candidate = (contrast, parameters, covariance, fitted, fit_mask, seed)
+        if best is None or contrast > best[0]:
+            best = candidate
+        if contrast >= MINIMUM_FITTED_CONTRAST:
+            best = candidate
+            break
     if best is None:
         raise AnalysisError(
-            "spectroscopy fit did not converge from any feature candidate"
+            "spectroscopy fit did not converge from any detected feature"
         )
 
-    _, parameters, covariance, fitted = best
+    _contrast, parameters, covariance, fitted, fit_mask, seed = best
     errors = np.sqrt(np.maximum(np.diag(covariance), 0.0))
-    residual = measured - fitted
+    residual = measured[fit_mask] - fitted[fit_mask]
     rmse = float(np.sqrt(np.mean(residual**2)))
     hwhm = abs(float(parameters[4]))
     fwhm = 2.0 * hwhm
@@ -520,7 +672,7 @@ def fit_spectroscopy(
         ),
     }
     statistics = {
-        "r_squared": _r_squared(measured, fitted),
+        "r_squared": _r_squared(measured[fit_mask], fitted[fit_mask]),
         "rmse": rmse,
         "contrast_snr": float(contrast_snr),
         "center_uncertainty_fraction_of_fwhm": float(
@@ -529,7 +681,16 @@ def fit_spectroscopy(
         "edge_distance_mhz": float(
             min(center - x[0], x[-1] - center)
         ),
-        "points": int(len(x)),
+        "points": int(np.count_nonzero(fit_mask)),
+        "trace_points": int(len(x)),
+        "detection_prominence_snr": float(seed.prominence_snr),
+        "detection_basis": seed.basis,
+        "detection_channel_snr": dict(seed.channel_snr),
+        "detection_corroborating_channels": int(seed.corroborating_channels),
+        "detection_geometry_score": float(seed.geometry_score),
+        "detection_candidates": int(len(detection.candidates)),
+        "delay_ns": float(detection.delay.delay_ns),
+        "delay_applied": bool(detection.delay.applied),
     }
     if normalized_kind == "resonator" and fwhm > 0:
         parameter_map["loaded_q"] = abs(center / fwhm)
@@ -546,13 +707,32 @@ def fit_spectroscopy(
         parameters=parameter_map,
         statistics=statistics,
         metadata=trace.metadata,
+        fit_mask=fit_mask,
+        detection=detection,
     )
 
 
 def plot_spectroscopy_fit(fit: SpectroscopyFit):
+    """Six panels: where the feature is, why, and how well it fitted.
+
+    The top row locates the feature in the whole sweep, then zooms on the
+    fitted window. The bottom row is the evidence: every detection channel in
+    units of its own noise against the thresholds, and the I/Q plane with the
+    cable delay removed, where a real resonance is a clean arc.
+    """
     definition = SPECTROSCOPY_KINDS[fit.kind]
-    dense_x = np.linspace(float(fit.x[0]), float(fit.x[-1]), 2000)
+    axis_label = f"{definition['axis_label']} (MHz)"
     p = fit.parameters
+    # Also serves FeatureSpectroscopyFit, which carries the same two fields.
+    detection = getattr(fit, "detection", None)
+    stored_mask = getattr(fit, "fit_mask", None)
+    mask = (
+        np.ones(fit.x.size, dtype=bool)
+        if stored_mask is None
+        else np.asarray(stored_mask, dtype=bool)
+    )
+    window_x = fit.x[mask]
+    dense_x = np.linspace(float(window_x[0]), float(window_x[-1]), 2000)
     dense_fit = _spectral_model(
         dense_x,
         p["offset"],
@@ -562,53 +742,201 @@ def plot_spectroscopy_fit(fit: SpectroscopyFit):
         p["hwhm_mhz"],
         float(np.mean(fit.x)),
     )
-    figure, axes = plt.subplots(
-        1,
-        3,
-        figsize=(15.5, 4.2),
-        constrained_layout=True,
+
+    figure, axes = plt.subplots(2, 3, figsize=(16.0, 8.4), constrained_layout=True)
+
+    # --- whole sweep, with every candidate the detector ranked -------------
+    overview = axes[0, 0]
+    overview.plot(fit.x, fit.measured, "-", linewidth=0.7, color="0.6", label="data")
+    overview.axvspan(
+        float(window_x[0]),
+        float(window_x[-1]),
+        color="tab:blue",
+        alpha=0.12,
+        label="fitted window",
     )
-    axes[0].plot(fit.x, fit.measured, "o", markersize=3, label="data")
-    axes[0].plot(dense_x, dense_fit, "-", linewidth=2, label="fit")
-    axes[0].axvline(
+    overview.axvline(fit.center_mhz, color="tab:red", linestyle="--", linewidth=1.5)
+    if detection is not None:
+        for rank, candidate in enumerate(detection.candidates[1:5], start=2):
+            overview.axvline(
+                candidate.center_mhz,
+                color="tab:orange",
+                linestyle=":",
+                linewidth=1.2,
+            )
+            overview.annotate(
+                f"#{rank}",
+                (candidate.center_mhz, float(np.max(fit.measured))),
+                fontsize=7,
+                color="tab:orange",
+                ha="center",
+                va="top",
+            )
+        for candidate in detection.marginal[:2]:
+            overview.axvline(
+                candidate.center_mhz,
+                color="0.5",
+                linestyle=":",
+                linewidth=1.0,
+            )
+    extra = (
+        len(detection.candidates) if detection is not None else 1
+    )
+    overview.set(
+        xlabel=axis_label,
+        ylabel=fit.signal_label,
+        title=f"Full sweep - {extra} candidate(s) detected",
+    )
+    overview.grid(alpha=0.3)
+    overview.legend(loc="best", fontsize=8)
+
+    # --- the fitted window --------------------------------------------------
+    zoom = axes[0, 1]
+    zoom.plot(window_x, fit.measured[mask], "o", markersize=3, label="data")
+    zoom.plot(dense_x, dense_fit, "-", linewidth=2, label="fit")
+    zoom.axvline(
         fit.center_mhz,
         color="tab:red",
         linestyle="--",
-        label=f"center = {fit.center_mhz:.6f} MHz",
+        label=f"{fit.center_mhz:.6f} MHz",
     )
-    axes[0].set(
-        xlabel=f"{definition['axis_label']} (MHz)",
+    half = 0.5 * float(p["fwhm_mhz"])
+    zoom.axvspan(
+        fit.center_mhz - half,
+        fit.center_mhz + half,
+        color="tab:red",
+        alpha=0.10,
+        label=f"FWHM {p['fwhm_mhz']:.4g} MHz",
+    )
+    zoom.set(
+        xlabel=axis_label,
         ylabel=fit.signal_label,
         title=(
-            f"{fit.kind.capitalize()} spectroscopy "
-            f"{fit.parameters['feature_polarity']} "
-            f"($R^2$={fit.statistics['r_squared']:.4f})"
+            f"{fit.kind.capitalize()} {p['feature_polarity']} "
+            f"($R^2$={fit.statistics['r_squared']:.4f}, "
+            f"SNR={fit.statistics['contrast_snr']:.1f})"
         ),
     )
-    axes[0].grid(alpha=0.3)
-    axes[0].legend(loc="best")
+    zoom.grid(alpha=0.3)
+    zoom.legend(loc="best", fontsize=8)
 
+    # --- residuals over the fitted window ----------------------------------
+    residual_axis = axes[0, 2]
     residual = fit.measured - fit.fitted
-    axes[1].axhline(0.0, color="0.4", linewidth=1)
-    axes[1].plot(fit.x, residual, "o-", markersize=3)
-    axes[1].set(
-        xlabel=f"{definition['axis_label']} (MHz)",
+    residual_axis.axhline(0.0, color="0.4", linewidth=1)
+    residual_axis.plot(window_x, residual[mask], "o-", markersize=3, linewidth=0.8)
+    residual_axis.set(
+        xlabel=axis_label,
         ylabel="Measured - fit",
         title=f"Residuals (RMSE={fit.statistics['rmse']:.3g})",
     )
-    axes[1].grid(alpha=0.3)
+    residual_axis.grid(alpha=0.3)
 
-    scatter = axes[2].scatter(
-        fit.iq.real,
-        fit.iq.imag,
-        c=fit.x,
-        s=18,
-        cmap="viridis",
+    # --- detection channels, each in units of its own noise ----------------
+    evidence = axes[1, 0]
+    if detection is not None:
+        for name, channel in detection.channels.items():
+            scale = channel.primary
+            evidence.plot(
+                detection.x,
+                scale.deviation / max(scale.noise, np.finfo(float).eps),
+                linewidth=0.9,
+                label=f"{name}{' (control)' if channel.is_control else ''}",
+            )
+        reference = next(iter(detection.channels.values()))
+        evidence.axhline(
+            reference.prominence_cut,
+            color="tab:red",
+            linestyle="--",
+            linewidth=1,
+            label=f"single-channel cut {reference.prominence_cut:.1f}",
+        )
+        evidence.axhline(-reference.prominence_cut, color="tab:red", linestyle="--", linewidth=1)
+        evidence.axhline(reference.deviation_cut, color="tab:orange", linestyle=":", linewidth=1)
+        evidence.axhline(-reference.deviation_cut, color="tab:orange", linestyle=":", linewidth=1)
+        evidence.axvline(fit.center_mhz, color="tab:red", linestyle="--", linewidth=1.2)
+    evidence.set(
+        xlabel=axis_label,
+        ylabel="Deviation / noise",
+        title="Detection channels vs thresholds",
     )
-    axes[2].set(xlabel="I", ylabel="Q", title="IQ trajectory")
-    axes[2].axis("equal")
-    axes[2].grid(alpha=0.3)
-    figure.colorbar(scatter, ax=axes[2], label="Frequency (MHz)")
+    evidence.grid(alpha=0.3)
+    evidence.legend(loc="best", fontsize=7)
+
+    # --- the I/Q plane, cable delay removed --------------------------------
+    plane = axes[1, 1]
+    # The detection ran on the whole trace; the fit may have been restricted
+    # to a window, so the two carry different lengths. Pair each set of
+    # complex values with its own frequency axis.
+    if detection is not None and detection.corrected.size == detection.x.size:
+        values, plane_x = detection.corrected, detection.x
+    else:
+        values, plane_x = fit.iq, fit.x
+    scatter = plane.scatter(
+        np.real(values), np.imag(values), c=plane_x, s=16, cmap="viridis"
+    )
+    near = np.abs(plane_x - fit.center_mhz) <= max(
+        float(p["fwhm_mhz"]), 3.0 * float(np.median(np.diff(plane_x)))
+    )
+    if np.any(near):
+        plane.plot(
+            np.real(values)[near],
+            np.imag(values)[near],
+            "o",
+            markersize=7,
+            markerfacecolor="none",
+            markeredgecolor="tab:red",
+            label="within FWHM",
+        )
+        plane.legend(loc="best", fontsize=8)
+    delay_note = (
+        f"delay {detection.delay.delay_ns:.1f} ns removed"
+        if detection is not None and detection.delay.applied
+        else "no delay removed"
+    )
+    plane.set(xlabel="I", ylabel="Q", title=f"I/Q plane ({delay_note})")
+    plane.axis("equal")
+    plane.grid(alpha=0.3)
+    figure.colorbar(scatter, ax=plane, label="Frequency (MHz)")
+
+    # --- the numbers --------------------------------------------------------
+    summary = axes[1, 2]
+    summary.axis("off")
+    lines = [
+        f"centre      {fit.center_mhz:.6f} MHz",
+        f"  +/-       {p['center_uncertainty_mhz']:.3g} MHz",
+        f"FWHM        {p['fwhm_mhz']:.6g} MHz",
+    ]
+    if "loaded_q" in p:
+        lines.append(f"loaded Q    {p['loaded_q']:.6g}")
+    statistics = fit.statistics
+    lines += [
+        "",
+        f"R^2         {statistics['r_squared']:.4f}",
+        f"contrast    {statistics['contrast_snr']:.2f}",
+        f"points      {statistics['points']} of {statistics.get('trace_points', statistics['points'])}",
+    ]
+    if "detection_basis" in statistics:
+        lines += [
+            "",
+            "detection",
+            f"  basis     {statistics['detection_basis']}",
+            f"  prominence {statistics['detection_prominence_snr']:.1f} sigma",
+            f"  geometry  {statistics['detection_geometry_score']:.2f}",
+        ]
+        for name, value in statistics.get("detection_channel_snr", {}).items():
+            lines.append(f"  {name:<12s}{value:.1f} sigma")
+    summary.text(
+        0.0,
+        1.0,
+        "\n".join(lines),
+        family="monospace",
+        fontsize=9,
+        va="top",
+        ha="left",
+        transform=summary.transAxes,
+    )
+
     figure.suptitle(f"Fit from {fit.source_csv.name}")
     return figure
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -32,8 +33,12 @@ LIVE_HARDWARE = False
 # INPUT_CSV = r"Z:\Your\Data\folder\00001 - (ResonatorSpectroscopy)name.csv"
 INPUT_CSV = None
 
-# Choose amplitude, phase, I, Q, or IQ. IQ uses the principal measured axis.
-FIT_SIGNAL = "IQ"
+# Only used when USE_COMPLEX_NOTCH is False. Choose amplitude, phase, I, Q, or
+# IQ. Amplitude is the right choice for a resonator: crossing a notch sweeps
+# the I/Q point around a circle, so any single projection of it mixes the
+# absorptive and dispersive quadratures into an asymmetric shape that a
+# symmetric Lorentzian cannot describe. |S21| is the absorptive part alone.
+FIT_SIGNAL = "amplitude"
 # Optional inclusive frequency window, for example (6882.0, 6886.0).
 FIT_WINDOW_MHZ = None
 
@@ -111,21 +116,35 @@ def main():
         f"contrast SNR: {fit.statistics['contrast_snr']:.3f}; "
         f"RMSE: {fit.statistics['rmse']:.6g}"
     )
-    print(
-        "Acceptance gates: "
-        f"{'PASS' if passes else 'FAIL'} "
-        f"(R^2 >= {MINIMUM_R_SQUARED}, "
-        f"contrast SNR >= {MINIMUM_CONTRAST_SNR}, "
-        + (
-            "edge distance / FWHM >= "
-            f"{MINIMUM_EDGE_DISTANCE_OVER_FWHM})"
-            if USE_COMPLEX_NOTCH
-            else (
-                "center uncertainty / FWHM <= "
-                f"{MAXIMUM_CENTER_UNCERTAINTY_FRACTION_OF_FWHM})"
-            )
+    if USE_COMPLEX_NOTCH:
+        gates = fit.acceptance_gates(
+            minimum_r_squared=MINIMUM_R_SQUARED,
+            minimum_contrast_snr=MINIMUM_CONTRAST_SNR,
+            minimum_edge_distance_over_fwhm=(
+                MINIMUM_EDGE_DISTANCE_OVER_FWHM
+            ),
         )
-    )
+    else:
+        gates = fit.acceptance_gates(
+            minimum_r_squared=MINIMUM_R_SQUARED,
+            minimum_contrast_snr=MINIMUM_CONTRAST_SNR,
+            maximum_center_uncertainty_fraction_of_fwhm=(
+                MAXIMUM_CENTER_UNCERTAINTY_FRACTION_OF_FWHM
+            ),
+        )
+        if "detection_basis" in fit.statistics:
+            print(
+                "Detection: "
+                f"{fit.statistics['detection_prominence_snr']:.1f} sigma "
+                f"({fit.statistics['detection_basis']}); "
+                f"I/Q arc {fit.statistics['detection_geometry_score']:.2f}; "
+                f"cable delay {fit.statistics['delay_ns']:.1f} ns"
+                + (" removed" if fit.statistics["delay_applied"] else " not removed")
+            )
+    print(f"Acceptance gates: {'PASS' if passes else 'FAIL'}")
+    for name, (ok, measured, threshold) in gates.items():
+        limit = "" if not np.isfinite(threshold) else f" (limit {threshold:g})"
+        print(f"  [{'ok' if ok else 'XX'}] {name}: {measured:.4g}{limit}")
     figure = (
         plot_notch_fit(fit)
         if USE_COMPLEX_NOTCH

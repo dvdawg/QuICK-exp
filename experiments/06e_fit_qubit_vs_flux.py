@@ -23,12 +23,8 @@ LIVE_HARDWARE = False
 INPUT_CSV = None
 EC_MHZ = 180.0
 USE_RESONATOR_PERIOD_HINT = True
-# None uses the full acquired frequency axis. Bounds are inclusive and may be
-# entered in either order. Example: (4500.0, 4800.0).
-FIT_FREQUENCY_WINDOW_MHZ = None
-# None uses every acquired flux row. Values are Z-gain units and bounds are
-# inclusive. Example: (-0.25, 0.15).
-FIT_FLUX_WINDOW_Z = None
+FIT_FREQUENCY_WINDOW_MHZ = None # None uses every acquired custom-path band. Bounds are inclusive and may be entered in either order. Example: (4500.0, 4800.0).
+FIT_FLUX_WINDOW_Z = None # None uses every acquired flux row. Values are Z-gain units and bounds are inclusive. Example: (-0.25, 0.15).
 MINIMUM_RIDGE_ROWS = 6
 MINIMUM_R_SQUARED = 0.95
 MAXIMUM_RMSE_MHZ = 5.0
@@ -65,11 +61,26 @@ def _period_hint():
         return None
 
 
+def _sweet_spot_hint():
+    if not USE_RESONATOR_PERIOD_HINT:
+        return None
+    repository = load_repository(PROJECT_ROOT)
+    try:
+        return float(
+            repository.calibration["records"]["lookups"][
+                "resonator_vs_flux"
+            ]["value"]["parameters"]["peak_bias"]
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def main():
     fit = fit_qubit_flux(
         _input_path(),
         ec_mhz=EC_MHZ,
         period_hint=_period_hint(),
+        sweet_spot_hint=_sweet_spot_hint(),
         frequency_window_mhz=FIT_FREQUENCY_WINDOW_MHZ,
         flux_window_z=FIT_FLUX_WINDOW_Z,
     )
@@ -89,6 +100,14 @@ def main():
         f"R^2={fit.statistics['r_squared']:.6f}; "
         f"RMSE={fit.statistics['rmse_mhz']:.6g} MHz"
     )
+    if fit.is_ragged:
+        counts = fit.statistics["row_point_counts"]
+        print(
+            "Custom-path map: "
+            f"{len(counts)} rows with {min(counts)}-{max(counts)} points; "
+            f"{fit.statistics['disjoint_frequency_rows']} rows contain "
+            "disjoint frequency bands"
+        )
     print(
         f"f_max={fit.parameters['f_max_mhz']:.6f} MHz; "
         f"period={fit.parameters['period_z']:.6g}; "

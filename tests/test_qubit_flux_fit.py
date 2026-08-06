@@ -5,7 +5,7 @@ import pytest
 
 import quickexp_v3.qubit_flux_fit as qubit_flux_fit
 from quickexp_v3.errors import AnalysisError
-from quickexp_v3.native_map import NativeMap
+from quickexp_v3.native_map import NativeMap, NativeRowMap
 from quickexp_v3.qubit_flux_fit import (
     fit_qubit_flux,
     fit_transmon_flux,
@@ -108,6 +108,108 @@ def test_qubit_flux_fit_applies_frequency_and_flux_windows(monkeypatch, tmp_path
         axis.tolist() == fit.frequencies_mhz.tolist()
         for axis in extracted_frequency_axes
     )
+
+
+def test_qubit_flux_fit_tracks_global_ridge_on_disjoint_path(
+    monkeypatch,
+    tmp_path,
+):
+    z = np.linspace(-0.12, 0.12, 7)
+    true_centers = transmon_frequency(
+        z,
+        f_max_mhz=4800.0,
+        period_z=0.30,
+        sweet_spot_z=0.0,
+        asymmetry=0.20,
+        ec_mhz=180.0,
+    )
+    frequency_rows = tuple(
+        np.concatenate(
+            [
+                np.linspace(center - 35.0, center - 8.0, 12),
+                np.linspace(center + 8.0, center + 35.0, 12 + index % 2),
+            ]
+        )
+        for index, center in enumerate(true_centers)
+    )
+    signal_rows = tuple(np.linspace(0.0, 1.0, row.size) for row in frequency_rows)
+    native = NativeRowMap(
+        source_csv=tmp_path / "path.csv",
+        outer_label="Z gain",
+        outer_unit="a.u.",
+        outer=z,
+        inner_label="Qubit pulse frequency",
+        inner_unit="MHz",
+        inner_rows=frequency_rows,
+        signals=MappingProxyType(
+            {
+                "amplitude": signal_rows,
+                "i": signal_rows,
+                "q": tuple(np.zeros_like(row) for row in signal_rows),
+            }
+        ),
+        row_metadata=MappingProxyType({}),
+        metadata=MappingProxyType({}),
+    )
+    monkeypatch.setattr(
+        qubit_flux_fit,
+        "load_native_map",
+        lambda _path: (_ for _ in ()).throw(
+            AnalysisError("native map inner axis must be uniformly spaced")
+        ),
+    )
+    monkeypatch.setattr(qubit_flux_fit, "load_native_row_map", lambda _path: native)
+    rows = iter(
+        (
+            (center + 70.0 * (-1) ** index, 0.2, 0.99, 20.0, np.ones(12)),
+            (center, 0.2, 0.98, 8.0, np.ones(12)),
+        )
+        for index, center in enumerate(true_centers)
+    )
+    monkeypatch.setattr(
+        qubit_flux_fit,
+        "_extract_row_candidates",
+        lambda _frequencies, _iq: next(rows),
+    )
+
+    parameters = {
+        "f_max_mhz": 4800.0,
+        "period_z": 0.30,
+        "sweet_spot_z": 0.0,
+        "asymmetry": 0.20,
+        "ec_mhz": 180.0,
+    }
+
+    def fit_known_model(row_z, centers, **_kwargs):
+        fitted = transmon_frequency(row_z, **parameters)
+        residual = np.asarray(centers) - fitted
+        return (
+            parameters,
+            fitted,
+            {
+                "r_squared": 1.0,
+                "rmse_mhz": float(np.sqrt(np.mean(residual**2))),
+                "max_abs_residual_mhz": float(np.max(np.abs(residual))),
+                "stderr": {},
+                "pinned_parameters": [],
+            },
+            {"period": True},
+        )
+
+    monkeypatch.setattr(qubit_flux_fit, "fit_transmon_flux", fit_known_model)
+
+    fit = fit_qubit_flux(
+        tmp_path / "path.csv",
+        period_hint=0.30,
+        sweet_spot_hint=0.0,
+    )
+
+    assert fit.is_ragged
+    assert fit.statistics["ragged_path_map"]
+    assert fit.statistics["ridge_selection"] == "global_transmon_candidates"
+    assert fit.statistics["disjoint_frequency_rows"] == len(z)
+    assert fit.statistics["row_point_counts"] == [24, 25, 24, 25, 24, 25, 24]
+    assert [row.center_mhz for row in fit.ridge_rows] == pytest.approx(true_centers)
 
 
 @pytest.mark.parametrize(

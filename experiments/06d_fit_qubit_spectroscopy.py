@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -35,7 +36,11 @@ FIT_SIGNAL = "IQ"
 FIT_WINDOW_MHZ = None
 ENABLE_TWO_FEATURE_SELECTION = True
 
-MINIMUM_R_SQUARED = 0.50
+# R^2 is measured over the local window the feature is fitted in, not the whole
+# sweep, so it now reflects how well the line itself is described. A shallow
+# line on a long noisy trace can be fitted perfectly and still score low here,
+# which is why the contrast and uncertainty gates carry most of the weight.
+MINIMUM_R_SQUARED = 0.30
 MINIMUM_CONTRAST_SNR = 3.0
 MAXIMUM_CENTER_UNCERTAINTY_FRACTION_OF_FWHM = 0.30
 
@@ -94,6 +99,23 @@ def main():
         f"contrast SNR: {fit.statistics['contrast_snr']:.3f}; "
         f"RMSE: {fit.statistics['rmse']:.6g}"
     )
+    if "detection_basis" in fit.statistics:
+        print(
+            "Detection: "
+            f"{fit.statistics['detection_prominence_snr']:.1f} sigma "
+            f"({fit.statistics['detection_basis']}); "
+            f"I/Q geometry {fit.statistics['detection_geometry_score']:.2f}; "
+            f"{fit.statistics.get('detected_candidates', 1)} candidate(s)"
+        )
+        per_channel = fit.statistics.get("detection_channel_snr", {})
+        if per_channel:
+            print(
+                "  per channel: "
+                + ", ".join(
+                    f"{name} {value:.1f} sigma"
+                    for name, value in per_channel.items()
+                )
+            )
     if ENABLE_TWO_FEATURE_SELECTION:
         print(
             "Feature selection: "
@@ -101,14 +123,17 @@ def main():
             f"Delta BIC(2 vs 1)={fit.statistics['delta_bic_two_vs_one']:.3f}; "
             f"ripple suspected={fit.statistics['ripple_suspected']}"
         )
-    print(
-        "Acceptance gates: "
-        f"{'PASS' if passes else 'FAIL'} "
-        f"(R^2 >= {MINIMUM_R_SQUARED}, "
-        f"contrast SNR >= {MINIMUM_CONTRAST_SNR}, "
-        "center uncertainty / FWHM <= "
-        f"{MAXIMUM_CENTER_UNCERTAINTY_FRACTION_OF_FWHM})"
+    gates = fit.acceptance_gates(
+        minimum_r_squared=MINIMUM_R_SQUARED,
+        minimum_contrast_snr=MINIMUM_CONTRAST_SNR,
+        maximum_center_uncertainty_fraction_of_fwhm=(
+            MAXIMUM_CENTER_UNCERTAINTY_FRACTION_OF_FWHM
+        ),
     )
+    print(f"Acceptance gates: {'PASS' if passes else 'FAIL'}")
+    for name, (ok, measured, threshold) in gates.items():
+        limit = "" if not np.isfinite(threshold) else f" (limit {threshold:g})"
+        print(f"  [{'ok' if ok else 'XX'}] {name}: {measured:.4g}{limit}")
     figure = plot_spectroscopy_fit(fit)
     if WRITE_ACCEPTED_FIT or FORCE_WRITE:
         if FORCE_WRITE and not passes:
