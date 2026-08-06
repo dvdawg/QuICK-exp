@@ -67,8 +67,8 @@ FIT_FLUX_WINDOW_Z = (MIN_Z_GAIN, MAX_Z_GAIN)
 ## Following a qubit feature with a custom sweep path
 
 Use `06g_design_qubit_sweep_path.py` after a broad two-dimensional scan. It
-infers generic parameter names from the background axes and stores one lower
-and upper inner-axis bound for each selected outer-axis row. For a
+infers generic parameter names from the background axes and stores one or more
+selected inner-axis intervals for each outer-axis row. For a
 Z-by-qubit-frequency map, it creates a `z_gain`/`q_freq` path that 06b can run.
 
 Two design modes are available:
@@ -114,6 +114,14 @@ SWEEP_PATH_YML = (
 row's saved `q_freq` values, and retains fitted readout-frequency tracking.
 Setting
 `SWEEP_PATH_YML = None` retains the original rectangular native sweep.
+
+Analyze either kind of result with `06e_fit_qubit_vs_flux.py`. With
+`INPUT_CSV = None`, it selects the latest `QubitSpecVsZ` run. Custom-path rows
+are kept at their acquired lengths and split at unswept gaps; the fitter finds
+several local candidates in each acquired band and selects one globally
+transmon-like ridge. The left plot displays the actual acquired points rather
+than filling the holes. Leave both fit-window settings at `None` to use every
+acquired point, or set either one to restrict the analysis further.
 
 At the library level, `SweepPath` and `run_sweep_path` are axis-generic: the
 YAML declares `outer.name` and `inner.name`, and the runner maps those names to

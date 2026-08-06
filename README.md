@@ -55,7 +55,7 @@ python -m pytest -q
 | `13a_ramsey.py`                            | Ramsey dephasing                                                          |
 | `14_echo.py`                               | Hahn echo / fixed-cycle CPMG                                              |
 | `16_two_photon_spectroscopy.py`            | high-power two-photon search                                              |
-| `17a_flux_step_spectroscopy.py`            | adaptive long-time flux-step spectroscopy                                |
+| `17a_flux_step_spectroscopy.py`            | parameter-driven adaptive long-time flux-step spectroscopy               |
 | `17b_fit_flux_iir.py`                      | fit/export the candidate matched-z inverse IIR                            |
 | `17c_cryoscope.py`                         | short-time Ramsey cryoscope acquisition                                  |
 | `17d_fit_flux_fir.py`                      | fit/export regularized forward and inverse FIR filters                    |

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 import runpy
 import shutil
@@ -486,6 +487,18 @@ def test_every_numbered_file_runs_to_completion_offline(tmp_path):
         if filename == "17c_cryoscope.py":
             module_globals["RAMSEY_PHASE_DEG"] = np.asarray(
                 [0.0, 90.0, 180.0, 270.0]
+            )
+        if filename == "17a_flux_step_spectroscopy.py":
+            parameters = module_globals["PARAMETERS"]
+            module_globals["PARAMETERS"] = replace(
+                parameters,
+                live_hardware=False,
+                probe_times_us=np.asarray(parameters.probe_times_us)[:3],
+                q_frequency_offsets_mhz=np.asarray(
+                    parameters.q_frequency_offsets_mhz
+                )[:8],
+                q_frequency_centers_mhz=5200.0,
+                show_plot=False,
             )
 
         result = namespace["main"]()

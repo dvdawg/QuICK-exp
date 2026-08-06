@@ -18,7 +18,7 @@ Candidate JSON files therefore carry `status: candidate_not_applied`.
 
 | Layer | Implementation | Status |
 | --- | --- | --- |
-| Long-time acquisition | `17a_flux_step_spectroscopy.py`, authored `FluxStepSpectroscopy` program | Implemented; adaptive or rectangular map |
+| Long-time acquisition | `17a_flux_step_spectroscopy.py`, authored `FluxStepSpectroscopy` program | Implemented; parameter-driven adaptive campaign |
 | Long-time fit | normalized sum of exponentials with automatic BIC order selection | Implemented |
 | IIR inverse | final-paper Appendix G roots, matched-z mapping, nearest SOS pairing | Implemented |
 | Short-time acquisition | `17c_cryoscope.py`, authored `Cryoscope` program | Interior diagnostic on current fabric; exact-edge data supported when imported |
@@ -92,13 +92,13 @@ Complete these before the first distortion measurement:
    gain instead of embedding the paper's `0.217` as a hardware command.
    The paper's `-0.127 Phi0` baseline is supplied on a separate DC path while
    the fast line returns to zero. `17a` therefore requires the operator to set
-   and read back the external bias and explicitly release
-   `EXTERNAL_BASELINE_CONFIRMED`; the launcher does not silently command an
-   unconfigured external instrument. If the DC and fast paths do not share the
-   fitted Z coordinate, cross-calibrate them and set both local-unit overrides;
-   never set only one. If this installation uses a single direct-coupled line,
-   change the program to command total baseline and target levels and revalidate
-   its state/parking behavior.
+   and read back the external bias and explicitly set
+   `PARAMETERS.external_baseline_confirmed=True`; the launcher does not
+   silently command an unconfigured external instrument. If the DC and fast
+   paths do not share the fitted Z coordinate, cross-calibrate them and set
+   both local-unit overrides; never set only one. If this installation uses a
+   single direct-coupled line, change the program to command total baseline and
+   target levels and revalidate its state/parking behavior.
 5. Scope the unfiltered Z pulse into a representative 50-ohm load. Record full
    scale, offset, 20–80% edge time, overshoot, and the relationship between
    requested gain and voltage.
@@ -134,6 +134,18 @@ Acceptance gate:
 
 Run `17a_flux_step_spectroscopy.py`.
 
+All normal run settings are in the single `PARAMETERS` object at the top of
+the launcher. Set `baseline_z` and `commanded_step_z` together to use final
+local commands, or leave both as `None` to convert `baseline_phi0` and the
+scaled `step_phi0` through the accepted `06e` fit. Likewise,
+`q_frequency_centers_mhz` accepts either one fixed center or one center per
+probe time; leaving it as `None` uses the accepted flux lookup to place the
+moving windows. Then run:
+
+```bash
+python experiments/17a_flux_step_spectroscopy.py
+```
+
 Paper-faithful settings:
 
 - baseline approximately `-0.127 Phi0`;
@@ -145,18 +157,22 @@ Paper-faithful settings:
 - step truncation near `t+110 ns` and readout near `t+220 ns`; and
 - trigger period near 300 us for a 19.2 us bias-tee time constant.
 
-Adaptive-row mode is the default. It measures only the +/-100 MHz window at
-each predicted center. A single rectangular Quick map must span the entire
-approximately 738 MHz qubit excursion, which is several times slower at the
-same spectral resolution. For 70 times, 201 frequencies, 2048 averages, and a
-300 us trigger, the ideal lower bound is about 2.4 hours before software and
-readout overhead. A 1001-bin rectangular map is about five times longer.
+The launcher always uses adaptive rows and measures only the +/-100 MHz window
+at each predicted or supplied center. This removes the slower rectangular mode,
+which cannot express the time-correlated readout-return level needed on the
+uncompensated pass. For 70 times, 201 frequencies, 2048 averages, and a 300 us
+trigger, the ideal lower bound is about 2.4 hours before software and readout
+overhead. The launcher prints this estimate before connecting.
 
 The first prediction only places windows. If a resonance approaches a window
-edge, expand the offsets or update `PREDICTION_ALPHAS/TAUS` and repeat that row.
-Do not fit an edge-pinned line.
+edge, expand `PARAMETERS.q_frequency_offsets_mhz`, supply corrected
+`q_frequency_centers_mhz`, or update the optional prediction fields and repeat
+that row. Do not fit an edge-pinned line.
 The launcher writes one campaign manifest containing the exact native CSV path
 for every row together with the resolved local baseline and step coordinates.
+It updates the manifest after every completed row and marks it complete only
+after the full campaign, so an interrupted multi-hour run keeps an exact list
+of the rows that were actually acquired.
 `17b` consumes that manifest before considering recent-file discovery,
 preventing rows from two campaigns from being mixed silently or reinterpreted
 after a default changes.
@@ -167,11 +183,13 @@ level during readout,
 waits about 70 ns after the 40 ns probe, applies that per-row level, starts
 readout about 110 ns later, and returns the fast line to zero after readout so
 the bias tee can discharge for the 300 us repetition interval. Adaptive mode
-computes the scalar separately for every row. A rectangular native map cannot
-express this correlated level and is therefore blocked on the uncompensated
-pass. After the dominant IIR is active, set `MODEL_READOUT_RETURN=False`, as in
-the paper. Verify all four timing landmarks on a scope because Mercator delay
-semantics and pulse-center conventions are installation-specific.
+computes the scalar separately for every row. The implementation derives the
+110 ns truncation offset from the configured probe length plus return delay, so
+those user parameters cannot silently disagree with the readout-return model.
+After the dominant IIR is active, set
+`PARAMETERS.first_uncompensated_pass=False`, as in the paper. Verify all four
+timing landmarks on a scope because Mercator delay semantics and pulse-center
+conventions are installation-specific.
 
 Acquire the long-time rows in increasing-time order, as Appendix F does. The
 paper also interleaves reference calibration points between the largest and
@@ -215,7 +233,7 @@ accepted calibration and has not been applied to hardware.
 ### 3. Second long-time iteration
 
 After the candidate is loaded through a verified site uploader, rerun `17a`
-with the filter enabled and `MODEL_READOUT_RETURN=False`. In `17b`, set
+with the filter enabled and `PARAMETERS.first_uncompensated_pass=False`. In `17b`, set
 `FIT_DC_GAIN=1.0`, refit the residual, and cascade that inverse after the first
 candidate. The paper used two IIR iterations: the first left errors below
 roughly 2 MHz over most of the fitted interval and the second reduced the
