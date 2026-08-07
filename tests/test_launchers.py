@@ -46,6 +46,7 @@ EXPECTED = [
     "17b_fit_flux_iir.py",
     "17c_cryoscope.py",
     "17d_fit_flux_fir.py",
+    "18a_resonator_flux_transient.py",
     "90_measurement_queue.py",
     "91_autocal.py",
     "92_review_proposals.py",

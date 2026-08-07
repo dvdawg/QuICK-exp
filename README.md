@@ -59,6 +59,7 @@ python -m pytest -q
 | `17b_fit_flux_iir.py`                      | fit/export the candidate matched-z inverse IIR                            |
 | `17c_cryoscope.py`                         | short-time Ramsey cryoscope acquisition                                  |
 | `17d_fit_flux_fir.py`                      | fit/export regularized forward and inverse FIR filters                    |
+| `18a_resonator_flux_transient.py`          | resonator as a slow flux sensor: long-time step transient and IIR         |
 | `90_measurement_queue.py`                  | run selected numbered files sequentially                                  |
 | `91_autocal.py`                            | run/resume a policy-governed calibration target                           |
 | `92_review_proposals.py`                   | inspect, promote, or reject inert proposals                               |

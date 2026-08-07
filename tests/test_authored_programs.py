@@ -71,7 +71,10 @@ def test_authored_program_plans_preflight_and_decode_synthetic_maps():
 
     step = get("flux_step_spectroscopy")
     step_plan = step.build(repo.resolve("flux_step_spectroscopy"))
-    assert FLUX_STEP_SPECTROSCOPY.preflight(soccfg(), step_plan.variables).ok
+    step_report = FLUX_STEP_SPECTROSCOPY.preflight(soccfg(), step_plan.variables)
+    assert step_report.ok
+    for slot in (9, 10, 11):
+        assert step_report.details["timing"][f"p{slot}_length"]["minimum_clocks"] >= 3.0
     step_data = step.decode(step_plan, backend.acquire(step_plan))
     assert step_data.points == 13 * 201
 
@@ -132,6 +135,7 @@ def test_install_all_authored_programs_is_idempotent():
     assert set(first) == {
         "Cryoscope",
         "FluxStepSpectroscopy",
+        "ResonatorFluxTransient",
         "TwoTone_ZPA",
         "T1_zpa",
     }
@@ -160,10 +164,7 @@ def test_quick_backend_routes_authored_sweeps_and_config_separately():
                 if name in var and np.asarray(value).size > 1
             }
             axes = [np.asarray(self.sweep[name]) for name in self.sweep]
-            grids = [
-                value.ravel()
-                for value in np.meshgrid(*axes, indexing="ij")
-            ]
+            grids = [value.ravel() for value in np.meshgrid(*axes, indexing="ij")]
             iq = np.full(grids[0].size, 0.5 + 0.1j)
             self.data = np.column_stack(
                 (*grids, np.abs(iq), np.angle(iq), iq.real, iq.imag)

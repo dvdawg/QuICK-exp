@@ -500,6 +500,15 @@ def test_every_numbered_file_runs_to_completion_offline(tmp_path):
                 q_frequency_centers_mhz=5200.0,
                 show_plot=False,
             )
+        if filename == "18a_resonator_flux_transient.py":
+            parameters = module_globals["PARAMETERS"]
+            module_globals["PARAMETERS"] = replace(
+                parameters,
+                live_hardware=False,
+                probe_times_us=np.geomspace(1.0, 100.0, 4),
+                reference_probe_points=9,
+                show_plot=False,
+            )
 
         result = namespace["main"]()
         if filename == "00_connect_and_ports.py":
@@ -533,6 +542,12 @@ def test_every_numbered_file_runs_to_completion_offline(tmp_path):
             assert isinstance(result, list)
         elif filename == "91_autocal.py":
             assert result.status in {"completed", "completed_with_escalations"}
+        elif filename == "18a_resonator_flux_transient.py":
+            # Offline the synthetic backend writes no native CSV, so the
+            # launcher acquires and then stops before the inversion.
+            campaign, trace, fit, inverse = result
+            assert campaign.transient_result is not None
+            assert (trace, fit, inverse) == (None, None, None)
         elif isinstance(result, list):
             assert len(result) == 3
             assert all(row.status.startswith("completed") for row in result)

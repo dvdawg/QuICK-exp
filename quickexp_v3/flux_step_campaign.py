@@ -57,10 +57,15 @@ class LongTimescaleFluxParameters:
     probe time. When omitted, centers are predicted from the accepted flux
     lookup and the exponential seed model. The prediction only places each
     spectroscopy window; it is not used by the subsequent fit.
+
+    ``baseline_on_fast_line`` selects the single-line topology: one DC-coupled
+    RF line both holds the operating point and delivers the step, so every Z
+    command is an absolute level rather than a delta about an external source.
     """
 
     live_hardware: bool = False
     external_baseline_confirmed: bool = False
+    baseline_on_fast_line: bool = False
 
     baseline_phi0: float = -0.127
     step_phi0: float = -0.217
@@ -83,7 +88,9 @@ class LongTimescaleFluxParameters:
     post_probe_to_return_us: float = 0.070
     return_to_readout_us: float = 0.110
     z_idle_gain: float = 0.0
-    z_set_length_us: float = 0.004
+    # Three clocks on the slowest Z fabric this repository has been run against
+    # (430.08 MHz) is 6.98 ns, so 6 ns fails preflight on an int4 generator.
+    z_set_length_us: float = 0.008
 
     use_accepted_resonator_flux_fit: bool = True
     readout_frequency_mhz: float = 6884.0
@@ -117,6 +124,40 @@ class _ResolvedCampaign:
     q_frequency_centers_mhz: np.ndarray
     q_nyquist_zone: int
     flux: _ResolvedFluxCommand
+
+
+@dataclass(frozen=True)
+class _FastLineLevels:
+    """Absolute fast-line commands for the step, readout, and idle phases."""
+
+    step: float
+    readout_rest: float
+    idle: float
+
+
+def _fast_line_levels(
+    parameters: LongTimescaleFluxParameters,
+    flux: _ResolvedFluxCommand,
+) -> _FastLineLevels:
+    """Resolve what the Z generator is actually commanded to in each phase.
+
+    With a separate DC source the fast line carries only the step and rests at
+    zero, so a command equals the delta. When the same RF line also holds the
+    operating point there is no second path to rest against: every command is
+    absolute and "rest" means the baseline itself.
+    """
+    if parameters.baseline_on_fast_line:
+        baseline = float(flux.baseline_z)
+        return _FastLineLevels(
+            step=baseline + float(flux.commanded_step_z),
+            readout_rest=baseline,
+            idle=baseline,
+        )
+    return _FastLineLevels(
+        step=float(flux.commanded_step_z),
+        readout_rest=0.0,
+        idle=float(parameters.z_idle_gain),
+    )
 
 
 def _finite(value: Any, label: str) -> float:
@@ -373,6 +414,20 @@ def _validate_scalar_parameters(parameters: LongTimescaleFluxParameters) -> None
     _nonnegative_integer(parameters.seed, "seed")
     if not str(parameters.title_prefix).strip():
         raise ConfigError("title_prefix must not be empty")
+    if parameters.baseline_on_fast_line:
+        # A line that can hold the operating point is DC-coupled, so there is
+        # no bias-tee droop for the Appendix F return level to cancel.
+        if parameters.first_uncompensated_pass:
+            raise ConfigError(
+                "baseline_on_fast_line requires first_uncompensated_pass=False: "
+                "a line that holds the operating point has no bias-tee droop "
+                "to compensate during readout"
+            )
+        if float(parameters.z_idle_gain) != 0.0:
+            raise ConfigError(
+                "baseline_on_fast_line drives the idle level from baseline_z; "
+                "leave z_idle_gain at 0.0"
+            )
     if parameters.first_uncompensated_pass:
         tau_us = _finite(parameters.bias_tee_tau_us, "bias_tee_tau_us")
         if tau_us <= 0:
@@ -400,10 +455,11 @@ def _validate_hardware_ranges(
         lower, upper = map(float, z_limits)
     if lower > upper:
         raise ConfigError("the configured fast-line Z limits are reversed")
+    commanded = _fast_line_levels(parameters, campaign.flux)
     levels = {
-        "commanded_step_z": campaign.flux.commanded_step_z,
-        "z_idle_gain": float(parameters.z_idle_gain),
-        "readout-return zero": 0.0,
+        "step level": commanded.step,
+        "readout-return level": commanded.readout_rest,
+        "idle level": commanded.idle,
     }
     for label, value in levels.items():
         if not lower <= value <= upper:
@@ -427,9 +483,17 @@ def _readout_return_gain(
     parameters: LongTimescaleFluxParameters,
     probe_time_us: float,
     commanded_step_z: float,
+    readout_rest_z: float = 0.0,
 ) -> float:
+    """Level the fast line holds while the resonator is probed.
+
+    ``readout_rest_z`` is the command that puts the qubit back at its operating
+    point: zero when a separate DC source owns the baseline, and the baseline
+    itself in the single-line topology.
+    """
+    rest = float(readout_rest_z)
     if not parameters.first_uncompensated_pass:
-        return 0.0
+        return rest
     # The return happens after the probe pulse and the configured post-probe
     # delay, so changing either parameter cannot silently desynchronize Eq. F1.
     truncation_time_us = (
@@ -437,7 +501,7 @@ def _readout_return_gain(
         + float(parameters.q_length_us)
         + float(parameters.post_probe_to_return_us)
     )
-    return float(commanded_step_z) * (
+    return rest + float(commanded_step_z) * (
         1.0 - np.exp(-truncation_time_us / float(parameters.bias_tee_tau_us))
     )
 
@@ -447,6 +511,7 @@ def _common_overrides(
     campaign: _ResolvedCampaign,
     readout_frequency_mhz: float,
 ) -> dict:
+    levels = _fast_line_levels(parameters, campaign.flux)
     return {
         "r_freq": float(readout_frequency_mhz),
         "r_power": float(parameters.readout_power_db),
@@ -455,9 +520,10 @@ def _common_overrides(
         "q_gain": float(parameters.q_gain),
         "q_length": float(parameters.q_length_us),
         "p1_nqz": campaign.q_nyquist_zone,
-        "z_step_gain": campaign.flux.commanded_step_z,
-        "z_return_gain": 0.0,
-        "z_idle_gain": float(parameters.z_idle_gain),
+        "z_step_gain": levels.step,
+        # Replaced per row; every row supplies its own return level.
+        "z_return_gain": levels.readout_rest,
+        "z_idle_gain": levels.idle,
         "z_set_length": float(parameters.z_set_length_us),
         "post_probe_to_return": float(parameters.post_probe_to_return_us),
         "return_guard": float(parameters.return_to_readout_us),
@@ -499,9 +565,12 @@ def _manifest_metadata(
         "flux_coordinate_source": campaign.flux.source,
         "baseline_z": campaign.flux.baseline_z,
         "commanded_step_z": campaign.flux.commanded_step_z,
+        "baseline_on_fast_line": bool(parameters.baseline_on_fast_line),
+        "commanded_step_level_z": _fast_line_levels(parameters, campaign.flux).step,
         "first_uncompensated_pass": bool(parameters.first_uncompensated_pass),
         "q_nyquist_zone": campaign.q_nyquist_zone,
         "q_length_us": float(parameters.q_length_us),
+        "z_set_length_us": float(parameters.z_set_length_us),
         "post_probe_to_return_us": float(parameters.post_probe_to_return_us),
         "return_to_readout_us": float(parameters.return_to_readout_us),
         "hard_avg": int(parameters.hard_avg),
@@ -530,7 +599,11 @@ def run_long_timescale_flux_step(
     repository = load_repository(project_root)
     campaign = _resolve_campaign(parameters, repository)
 
-    if parameters.live_hardware and not parameters.external_baseline_confirmed:
+    if (
+        parameters.live_hardware
+        and not parameters.baseline_on_fast_line
+        and not parameters.external_baseline_confirmed
+    ):
         raise ConfigError(
             "set and read back the external DC baseline at "
             f"Z={campaign.flux.baseline_z:+.8g}, then set "
@@ -553,12 +626,21 @@ def run_long_timescale_flux_step(
         * float(parameters.readout_relax_us)
         / 3.6e9
     )
+    levels = _fast_line_levels(parameters, campaign.flux)
     print(f"Protocol source: DOI {PAPER_DOI}")
-    print(
-        f"Flux command ({campaign.flux.source}): external baseline "
-        f"Z={campaign.flux.baseline_z:+.8g}, fast-step delta "
-        f"Z={campaign.flux.commanded_step_z:+.8g}."
-    )
+    if parameters.baseline_on_fast_line:
+        print(
+            f"Flux command ({campaign.flux.source}): single DC-coupled fast "
+            f"line, absolute levels step Z={levels.step:+.8g}, readout/idle "
+            f"Z={levels.readout_rest:+.8g} (delta "
+            f"{campaign.flux.commanded_step_z:+.8g})."
+        )
+    else:
+        print(
+            f"Flux command ({campaign.flux.source}): external baseline "
+            f"Z={campaign.flux.baseline_z:+.8g}, fast-step delta "
+            f"Z={campaign.flux.commanded_step_z:+.8g}."
+        )
     print(
         f"Adaptive long-time campaign: {row_count} rows x "
         f"{frequencies_per_row} frequencies, {averages} averages/point, "
@@ -611,6 +693,7 @@ def run_long_timescale_flux_step(
                         parameters,
                         float(time_us),
                         campaign.flux.commanded_step_z,
+                        levels.readout_rest,
                     ),
                 },
                 run_options={"population": False},

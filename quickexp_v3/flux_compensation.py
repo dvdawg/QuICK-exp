@@ -84,6 +84,8 @@ class SpectroscopyRow:
     uncertainty_mhz: float
     r_squared: float
     contrast_snr: float
+    detection_sigma: float = 0.0
+    width_mhz: float = 0.0
     line_shape: str = "unknown"
 
 
@@ -558,6 +560,22 @@ def design_iir_inverse(
     )
 
 
+def _line_profile(
+    frequency_mhz: np.ndarray,
+    center: float,
+    width: float,
+    line_shape: str,
+) -> np.ndarray:
+    normalized_frequency = (frequency_mhz - center) / width
+    if line_shape == "gaussian":
+        return np.exp(-0.5 * normalized_frequency**2)
+    if line_shape == "lorentzian":
+        return 1.0 / (1.0 + 1j * normalized_frequency)
+    raise AnalysisError(  # pragma: no cover - internal invariant
+        f"unsupported line shape {line_shape!r}"
+    )
+
+
 def _fit_spectroscopy_row(frequency_mhz: np.ndarray, iq: np.ndarray) -> tuple:
     """Fit a complex Gaussian or Lorentzian resonance and keep the better fit.
 
@@ -566,6 +584,12 @@ def _fit_spectroscopy_row(frequency_mhz: np.ndarray, iq: np.ndarray) -> tuple:
     power-broadened or resonator-like; the equal-parameter Lorentzian candidate
     avoids forcing that data into the wrong line shape.  Raw complex-IQ RSS is
     sufficient for selection because both candidates have eight parameters.
+
+    Alongside the per-point contrast this returns ``detection_sigma``, the
+    amplitude integrated over the profile as it was actually sampled.  A line
+    that is resolved by many points is detected far more significantly than its
+    per-point depth suggests, so the integrated figure is the one that survives
+    a change of sweep span or step.
     """
     values = np.asarray(iq, dtype=complex).ravel()
     if values.size != frequency_mhz.size or not np.all(
@@ -647,14 +671,12 @@ def _fit_spectroscopy_row(frequency_mhz: np.ndarray, iq: np.ndarray) -> tuple:
         offset = complex(parameters[0], parameters[1])
         slope = complex(parameters[2], parameters[3])
         amplitude = complex(parameters[4], parameters[5])
-        center, width = parameters[6], parameters[7]
-        normalized_frequency = (frequency_mhz - center) / width
-        if line_shape == "gaussian":
-            profile = np.exp(-0.5 * normalized_frequency**2)
-        elif line_shape == "lorentzian":
-            profile = 1.0 / (1.0 + 1j * normalized_frequency)
-        else:  # pragma: no cover - internal invariant
-            raise AnalysisError(f"unsupported line shape {line_shape!r}")
+        profile = _line_profile(
+            frequency_mhz,
+            parameters[6],
+            parameters[7],
+            line_shape,
+        )
         return (
             offset
             + slope * (frequency_mhz - reference)
@@ -693,20 +715,96 @@ def _fit_spectroscopy_row(frequency_mhz: np.ndarray, iq: np.ndarray) -> tuple:
         float(np.sqrt(np.mean(np.abs(residual_values) ** 2))),
         np.finfo(float).eps,
     )
+    amplitude = abs(complex(result.x[4], result.x[5]))
+    width = abs(float(result.x[7]))
+    # Number of samples the profile is effectively worth, so a resolved line
+    # keeps its significance when the sweep is resampled.
+    effective_samples = float(
+        np.sum(
+            np.abs(
+                _line_profile(frequency_mhz, result.x[6], result.x[7], line_shape)
+            )
+            ** 2
+        )
+    )
     return (
         float(result.x[6]),
         center_uncertainty,
         r_squared(values, fitted),
-        abs(complex(result.x[4], result.x[5])) / noise,
+        amplitude / noise,
+        amplitude * np.sqrt(max(effective_samples, 0.0)) / noise,
+        width,
+        effective_samples,
         line_shape,
     )
+
+
+def _row_passes_qc(
+    row_r2: float,
+    contrast: float,
+    detection: float,
+    center: float,
+    width: float,
+    effective_samples: float,
+    frequency_mhz: np.ndarray,
+    *,
+    minimum_row_r_squared: float,
+    minimum_contrast_snr: float,
+    minimum_detection_sigma: float,
+    minimum_effective_samples: float,
+    maximum_width_fraction: float,
+) -> bool:
+    """Accept a spectroscopy row on integrated significance and localisation.
+
+    ``r_squared`` and the per-point ``contrast`` both measure the line against
+    the whole sweep, so both shrink as the span widens or the step shrinks: a
+    genuine 8 sigma line spread over 300 MHz of a 301-point scan lands near
+    r^2 = 0.1 and contrast = 1.5, and no threshold on either can separate it
+    from noise.  They are kept as optional floors, off by default.
+
+    ``detection_sigma`` integrates the amplitude over the fitted profile and is
+    invariant to that resampling.  It is only meaningful when the line really
+    is a line, so two shape checks travel with it:
+
+    * the profile must be worth at least a few samples of the grid it was
+      measured on, or amplitude and width are not separably constrained and a
+      single noisy bin fits as a very narrow, very significant "line";
+    * the width must stay well inside the sweep, or a fit that absorbed the
+      baseline into a span-wide "resonance" reports a large and entirely
+      spurious significance.
+
+    A centre that has railed against the edge of the sweep is rejected too: the
+    line is then only partly inside the window, so its position is bounded
+    rather than measured.
+    """
+    span = float(np.ptp(frequency_mhz))
+    step = abs(float(np.median(np.diff(frequency_mhz))))
+    low = min(float(frequency_mhz[0]), float(frequency_mhz[-1]))
+    high = max(float(frequency_mhz[0]), float(frequency_mhz[-1]))
+    if not np.isfinite(detection) or detection < minimum_detection_sigma:
+        return False
+    if not np.isfinite(center) or not low + step <= center <= high - step:
+        return False
+    if not np.isfinite(width) or width > maximum_width_fraction * span:
+        return False
+    if (
+        not np.isfinite(effective_samples)
+        or effective_samples < minimum_effective_samples
+    ):
+        return False
+    if row_r2 < minimum_row_r_squared or contrast < minimum_contrast_snr:
+        return False
+    return True
 
 
 def extract_step_spectroscopy(
     csv_path: Path,
     *,
-    minimum_row_r_squared: float = 0.25,
-    minimum_contrast_snr: float = 3.0,
+    minimum_row_r_squared: float = 0.0,
+    minimum_contrast_snr: float = 0.0,
+    minimum_detection_sigma: float = 4.0,
+    minimum_effective_samples: float = 3.0,
+    maximum_width_fraction: float = 0.125,
 ) -> FluxStepTrace:
     native = load_native_map(csv_path)
     if "time" not in native.outer_label.lower():
@@ -717,14 +815,33 @@ def extract_step_spectroscopy(
     dropped = list(map(float, native.incomplete_outer))
     for time_value, iq_row in zip(native.outer, native.complex_signal):
         try:
-            center, uncertainty, row_r2, contrast, line_shape = _fit_spectroscopy_row(
-                native.inner,
-                iq_row,
-            )
+            (
+                center,
+                uncertainty,
+                row_r2,
+                contrast,
+                detection,
+                width,
+                effective_samples,
+                line_shape,
+            ) = _fit_spectroscopy_row(native.inner, iq_row)
         except (AnalysisError, RuntimeError, ValueError, FloatingPointError):
             dropped.append(float(time_value))
             continue
-        if row_r2 < minimum_row_r_squared or contrast < minimum_contrast_snr:
+        if not _row_passes_qc(
+            row_r2,
+            contrast,
+            detection,
+            center,
+            width,
+            effective_samples,
+            native.inner,
+            minimum_row_r_squared=minimum_row_r_squared,
+            minimum_contrast_snr=minimum_contrast_snr,
+            minimum_detection_sigma=minimum_detection_sigma,
+            minimum_effective_samples=minimum_effective_samples,
+            maximum_width_fraction=maximum_width_fraction,
+        ):
             dropped.append(float(time_value))
             continue
         rows.append(
@@ -734,6 +851,8 @@ def extract_step_spectroscopy(
                 uncertainty_mhz=max(uncertainty, np.finfo(float).eps),
                 r_squared=float(row_r2),
                 contrast_snr=float(contrast),
+                detection_sigma=float(detection),
+                width_mhz=float(width),
                 line_shape=line_shape,
             )
         )
@@ -750,8 +869,11 @@ def extract_step_spectroscopy(
 def extract_step_spectroscopy_rows(
     csv_paths: Sequence[Path],
     *,
-    minimum_row_r_squared: float = 0.25,
-    minimum_contrast_snr: float = 3.0,
+    minimum_row_r_squared: float = 0.0,
+    minimum_contrast_snr: float = 0.0,
+    minimum_detection_sigma: float = 4.0,
+    minimum_effective_samples: float = 3.0,
+    maximum_width_fraction: float = 0.125,
 ) -> FluxStepTrace:
     """Load adaptive one-spectrum-per-time acquisitions as one trace."""
     if not csv_paths:
@@ -759,13 +881,20 @@ def extract_step_spectroscopy_rows(
     rows = []
     dropped = []
     sources = []
+    unreadable = []
     for csv_path in csv_paths:
-        native = load_native_trace(
-            csv_path,
-            quick_class="FluxStepSpectroscopy",
-            axis_text="frequency",
-            minimum_points=8,
-        )
+        # An aborted acquisition leaves a short CSV behind.  Losing that one
+        # time point is not a reason to discard the rest of the campaign.
+        try:
+            native = load_native_trace(
+                csv_path,
+                quick_class="FluxStepSpectroscopy",
+                axis_text="frequency",
+                minimum_points=8,
+            )
+        except (AnalysisError, OSError, ValueError):
+            unreadable.append(Path(csv_path))
+            continue
         sources.append(native.source_csv)
         parameters = native.metadata.get("parameters", {})
         variables = parameters.get("var", parameters)
@@ -776,14 +905,33 @@ def extract_step_spectroscopy_rows(
                 f"{native.source_csv.name} has no scalar probe_time metadata"
             ) from error
         try:
-            center, uncertainty, row_r2, contrast, line_shape = _fit_spectroscopy_row(
-                native.x,
-                native.iq,
-            )
+            (
+                center,
+                uncertainty,
+                row_r2,
+                contrast,
+                detection,
+                width,
+                effective_samples,
+                line_shape,
+            ) = _fit_spectroscopy_row(native.x, native.iq)
         except (AnalysisError, RuntimeError, ValueError, FloatingPointError):
             dropped.append(time_value)
             continue
-        if row_r2 < minimum_row_r_squared or contrast < minimum_contrast_snr:
+        if not _row_passes_qc(
+            row_r2,
+            contrast,
+            detection,
+            center,
+            width,
+            effective_samples,
+            native.x,
+            minimum_row_r_squared=minimum_row_r_squared,
+            minimum_contrast_snr=minimum_contrast_snr,
+            minimum_detection_sigma=minimum_detection_sigma,
+            minimum_effective_samples=minimum_effective_samples,
+            maximum_width_fraction=maximum_width_fraction,
+        ):
             dropped.append(time_value)
             continue
         rows.append(
@@ -793,8 +941,15 @@ def extract_step_spectroscopy_rows(
                 uncertainty_mhz=max(uncertainty, np.finfo(float).eps),
                 r_squared=float(row_r2),
                 contrast_snr=float(contrast),
+                detection_sigma=float(detection),
+                width_mhz=float(width),
                 line_shape=line_shape,
             )
+        )
+    if unreadable and not sources:
+        raise AnalysisError(
+            "no adaptive spectroscopy CSV could be read; "
+            f"{len(unreadable)} file(s) were empty or truncated"
         )
     # If a repeated time exists, prefer the newest path supplied by the caller.
     by_time = {row.time_us: row for row in rows}

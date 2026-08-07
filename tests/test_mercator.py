@@ -187,6 +187,12 @@ def test_flat_top_memory_uses_conservative_ramp_budget_and_missing_term_fails():
 def test_preflight_rejects_subclock_timing_and_unbound_sweep():
     program = _readout_program()
     variables = program.default_variables()
+    variables["r_length"] = 0.004
+    report = program.preflight(_soccfg(), variables)
+    assert not report.ok
+    assert any("three-fabric-clock minimum" in error for error in report.errors)
+
+    variables = program.default_variables()
     variables["r_length"] = 0.0005
     report = program.preflight(_soccfg(), variables)
     assert not report.ok

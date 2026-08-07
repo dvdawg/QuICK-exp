@@ -14,6 +14,7 @@ from quickexp_v3.flux_compensation import (
     design_inverse_fir,
     extract_cryoscope_phases,
     extract_step_spectroscopy,
+    extract_step_spectroscopy_rows,
     fit_forward_fir,
     fit_step_response,
     flux_command_from_phi0_fractions,
@@ -86,6 +87,211 @@ def write_native_map(path, outer, inner, iq_rows, *, quick_class, labels):
         ),
         encoding="utf-8",
     )
+
+
+def write_native_trace(path, frequency, iq, *, probe_time_us, quick_class):
+    np.savetxt(
+        path,
+        np.column_stack(
+            (frequency, np.abs(iq), np.angle(iq), np.real(iq), np.imag(iq))
+        ),
+        delimiter=",",
+    )
+    path.with_suffix(".yml").write_text(
+        yaml.safe_dump(
+            {
+                "independent": [["Qubit Probe Frequency", "MHz"]],
+                "dependent": [
+                    ["Amplitude", ""],
+                    ["Phase", "rad"],
+                    ["I", ""],
+                    ["Q", ""],
+                ],
+                "parameters": {
+                    "quick_experiment": quick_class,
+                    "var": {"probe_time": float(probe_time_us)},
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_weak_line_rows(directory, centers, *, amplitude=1.9, width_mhz=15.0, seed=0):
+    """Adaptive rows with the statistics of a real qubit-spectroscopy sweep.
+
+    301 points across 300 MHz around a 15 MHz line.  The per-point contrast
+    (~1.3) and the r-squared (~0.08) are both far below what a strong resonator
+    notch produces, yet the line integrates to a ~7 sigma detection.
+    """
+    generator = np.random.default_rng(seed)
+    frequency = np.linspace(4400.0, 4700.0, 301)
+    times = np.geomspace(0.025, 10.0, len(centers))
+    paths = []
+    for index, (probe_time, center) in enumerate(zip(times, centers)):
+        profile = np.exp(-0.5 * ((frequency - center) / width_mhz) ** 2)
+        noise = generator.normal(0.0, 1.0, frequency.size) + 1j * generator.normal(
+            0.0, 1.0, frequency.size
+        )
+        iq = 40.0 + 3.0j - amplitude * profile + noise
+        path = directory / f"row_{index:02d}.csv"
+        write_native_trace(
+            path,
+            frequency,
+            iq,
+            probe_time_us=probe_time,
+            quick_class="FluxStepSpectroscopy",
+        )
+        paths.append(path)
+    return paths, times
+
+
+def test_adaptive_rows_accept_a_weak_line_spread_over_a_wide_sweep(tmp_path):
+    """A real 7 sigma line must survive row QC.
+
+    r-squared and per-point contrast both fall as the sweep widens or is
+    sampled more finely, so neither can gate a narrow line in a wide scan.
+    """
+    centers = np.linspace(4640.0, 4530.0, 12)
+    paths, times = write_weak_line_rows(tmp_path, centers)
+
+    trace = extract_step_spectroscopy_rows(paths)
+
+    assert len(trace.rows) >= 10
+    expected = np.interp(trace.time_us, times, centers)
+    deviation = trace.center_mhz - expected
+    reported = np.asarray([row.uncertainty_mhz for row in trace.rows])
+    # A weak line is located to a few MHz, and the fit must say so honestly.
+    assert np.all(np.abs(deviation) < 4.0 * reported)
+    assert float(np.sqrt(np.mean(deviation**2))) < 6.0
+    # The statistics that used to gate these rows really are this small.
+    assert max(row.r_squared for row in trace.rows) < 0.25
+    assert max(row.contrast_snr for row in trace.rows) < 3.0
+    assert min(row.detection_sigma for row in trace.rows) >= 4.0
+
+
+def test_adaptive_rows_still_reject_pure_noise(tmp_path):
+    generator = np.random.default_rng(3)
+    frequency = np.linspace(4400.0, 4700.0, 301)
+    paths = []
+    for index, probe_time in enumerate(np.geomspace(0.025, 10.0, 12)):
+        iq = 40.0 + 3.0j + generator.normal(0.0, 1.0, frequency.size) + 1j * (
+            generator.normal(0.0, 1.0, frequency.size)
+        )
+        path = tmp_path / f"noise_{index:02d}.csv"
+        write_native_trace(
+            path,
+            frequency,
+            iq,
+            probe_time_us=probe_time,
+            quick_class="FluxStepSpectroscopy",
+        )
+        paths.append(path)
+
+    with pytest.raises(AnalysisError, match="row QC"):
+        extract_step_spectroscopy_rows(paths)
+
+
+def test_adaptive_rows_reject_a_fit_that_swallowed_the_baseline(tmp_path):
+    """A 'line' as wide as the sweep is baseline curvature, not a resonance."""
+    generator = np.random.default_rng(5)
+    frequency = np.linspace(4400.0, 4700.0, 301)
+    paths = []
+    for index, probe_time in enumerate(np.geomspace(0.025, 10.0, 12)):
+        broad = np.exp(-0.5 * ((frequency - 4550.0) / 150.0) ** 2)
+        iq = 40.0 + 3.0j - 12.0 * broad + generator.normal(
+            0.0, 1.0, frequency.size
+        ) + 1j * generator.normal(0.0, 1.0, frequency.size)
+        path = tmp_path / f"broad_{index:02d}.csv"
+        write_native_trace(
+            path,
+            frequency,
+            iq,
+            probe_time_us=probe_time,
+            quick_class="FluxStepSpectroscopy",
+        )
+        paths.append(path)
+
+    with pytest.raises(AnalysisError, match="row QC"):
+        extract_step_spectroscopy_rows(paths)
+
+
+def test_adaptive_rows_reject_an_unresolved_single_bin_spike(tmp_path):
+    """A spike narrower than the grid is a hot sample, not a resonance.
+
+    Such a fit reports a tiny centre uncertainty, so letting it through would
+    give it the largest weight of any point in the downstream step-response
+    fit.
+    """
+    generator = np.random.default_rng(7)
+    frequency = np.linspace(4400.0, 4700.0, 301)
+    paths = []
+    for index, probe_time in enumerate(np.geomspace(0.025, 10.0, 12)):
+        iq = 40.0 + 3.0j + generator.normal(0.0, 1.0, frequency.size) + 1j * (
+            generator.normal(0.0, 1.0, frequency.size)
+        )
+        iq[150 + index] -= 30.0
+        path = tmp_path / f"spike_{index:02d}.csv"
+        write_native_trace(
+            path,
+            frequency,
+            iq,
+            probe_time_us=probe_time,
+            quick_class="FluxStepSpectroscopy",
+        )
+        paths.append(path)
+
+    with pytest.raises(AnalysisError, match="row QC"):
+        extract_step_spectroscopy_rows(paths)
+
+
+def test_adaptive_rows_reject_a_centre_railed_against_the_sweep_edge(tmp_path):
+    """A line half outside the window has a bounded centre, not a measured one."""
+    generator = np.random.default_rng(11)
+    frequency = np.linspace(4400.0, 4700.0, 301)
+    paths = []
+    for index, probe_time in enumerate(np.geomspace(0.025, 10.0, 12)):
+        profile = np.exp(-0.5 * ((frequency - 4380.0) / 15.0) ** 2)
+        iq = 40.0 + 3.0j - 6.0 * profile + generator.normal(
+            0.0, 1.0, frequency.size
+        ) + 1j * generator.normal(0.0, 1.0, frequency.size)
+        path = tmp_path / f"railed_{index:02d}.csv"
+        write_native_trace(
+            path,
+            frequency,
+            iq,
+            probe_time_us=probe_time,
+            quick_class="FluxStepSpectroscopy",
+        )
+        paths.append(path)
+
+    with pytest.raises(AnalysisError, match="row QC"):
+        extract_step_spectroscopy_rows(paths)
+
+
+def test_adaptive_rows_drop_a_truncated_csv_instead_of_aborting(tmp_path):
+    """One aborted acquisition must not discard the rest of the campaign."""
+    centers = np.linspace(4640.0, 4530.0, 12)
+    paths, times = write_weak_line_rows(tmp_path, centers, seed=1)
+    aborted_time = times[4]
+    (tmp_path / "row_04.csv").write_text("4400.0,1.0,0.0,1.0,0.0\n", encoding="utf-8")
+
+    trace = extract_step_spectroscopy_rows(paths)
+
+    assert len(trace.rows) >= 9
+    assert not np.any(np.isclose(trace.time_us, aborted_time))
+
+
+def test_adaptive_rows_report_when_no_csv_can_be_read(tmp_path):
+    paths = []
+    for index in range(3):
+        path = tmp_path / f"empty_{index:02d}.csv"
+        path.write_text("", encoding="utf-8")
+        paths.append(path)
+
+    with pytest.raises(AnalysisError, match="empty or truncated"):
+        extract_step_spectroscopy_rows(paths)
 
 
 def test_step_fit_selects_and_recovers_three_physical_timescales():

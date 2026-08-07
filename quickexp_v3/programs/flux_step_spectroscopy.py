@@ -24,7 +24,7 @@ for _declaration in (
     ("z_step_gain", 0.05, "Flux Step Gain", "a.u."),
     ("z_return_gain", 0.0, "Flux Return Gain", "a.u."),
     ("z_idle_gain", 0.0, "Post-Readout Fast-Line Gain", "a.u."),
-    ("z_set_length", 0.004, "Persistent Z Set Pulse Length", "us"),
+    ("z_set_length", 0.006, "Persistent Z Set Pulse Length", "us"),
     ("probe_time", 1.0, "Flux Step Observation Time", "us"),
     ("post_probe_to_return", 0.07, "Probe-End to Flux Return", "us"),
     ("return_guard", 0.11, "Flux Return to Readout Guard", "us"),

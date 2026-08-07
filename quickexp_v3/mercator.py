@@ -102,9 +102,7 @@ class Expr:
                     or len(node.args) != 1
                     or node.keywords
                 ):
-                    raise ConfigError(
-                        "Mercator expressions may call only int(value)"
-                    )
+                    raise ConfigError("Mercator expressions may call only int(value)")
         object.__setattr__(self, "source", source)
 
 
@@ -119,9 +117,7 @@ class PreflightReport:
 def _unknown_field(kind: str, name: str, valid: tuple) -> ConfigError:
     nearest = difflib.get_close_matches(str(name), valid, n=1)
     suggestion = f"; did you mean {nearest[0]!r}?" if nearest else ""
-    return ConfigError(
-        f"unknown Mercator {kind} field {name!r}{suggestion}"
-    )
+    return ConfigError(f"unknown Mercator {kind} field {name!r}{suggestion}")
 
 
 def _template(value: Any) -> str:
@@ -192,9 +188,7 @@ def _safe_eval_scalar(source: str, variables: Mapping[str, Any]) -> Any:
             return operations[type(node.op)]()
         if isinstance(node, ast.Call):
             return int(evaluate(node.args[0]))
-        raise ConfigError(
-            f"unsupported Mercator expression node {type(node).__name__}"
-        )
+        raise ConfigError(f"unsupported Mercator expression node {type(node).__name__}")
 
     return evaluate(tree)
 
@@ -202,34 +196,20 @@ def _safe_eval_scalar(source: str, variables: Mapping[str, Any]) -> Any:
 def _evaluate(value: Any, variables: Mapping[str, Any]) -> np.ndarray:
     if isinstance(value, Var):
         if value.name not in variables:
-            raise ConfigError(
-                f"Mercator variable {value.name!r} has no runtime value"
-            )
+            raise ConfigError(f"Mercator variable {value.name!r} has no runtime value")
         return np.asarray(variables[value.name])
     if not isinstance(value, Expr):
         return np.asarray(value)
     names = _expression_names(value.source)
-    arrays = {
-        name: np.asarray(variables[name])
-        for name in names
-        if name in variables
-    }
+    arrays = {name: np.asarray(variables[name]) for name in names if name in variables}
     missing = set(names).difference(arrays)
     if missing:
         raise ConfigError(
-            "Mercator expression has no runtime value for "
-            + ", ".join(sorted(missing))
+            "Mercator expression has no runtime value for " + ", ".join(sorted(missing))
         )
-    swept = {
-        name: array.ravel()
-        for name, array in arrays.items()
-        if array.size > 1
-    }
+    swept = {name: array.ravel() for name, array in arrays.items() if array.size > 1}
     if not swept:
-        scalars = {
-            name: array.ravel()[0]
-            for name, array in arrays.items()
-        }
+        scalars = {name: array.ravel()[0] for name, array in arrays.items()}
         return np.asarray(_safe_eval_scalar(value.source, scalars))
     sweep_names = tuple(swept)
     mesh = np.meshgrid(
@@ -303,9 +283,7 @@ class MercatorProgram:
     ) -> "MercatorProgram":
         name = str(variable_name)
         if name not in self._variables:
-            raise ConfigError(
-                f"envelope term references undeclared variable {name!r}"
-            )
+            raise ConfigError(f"envelope term references undeclared variable {name!r}")
         if int(count) < 1:
             raise ConfigError("envelope count must be at least one")
         if any(existing[0] == name for existing in self._envelope_terms):
@@ -355,18 +333,14 @@ class MercatorProgram:
                 f"Mercator pulse slot {number} must be non-negative and unique"
             )
         if gain is not None and power is not None:
-            raise ConfigError(
-                f"pulse slot {number} cannot declare both gain and power"
-            )
+            raise ConfigError(f"pulse slot {number} cannot declare both gain and power")
         if style is not None and style not in _ALLOWED_STYLES:
             raise ConfigError(
                 f"pulse slot {number} style must be one of "
                 + ", ".join(sorted(_ALLOWED_STYLES))
             )
         if sigma is not None and style != "flat_top":
-            raise ConfigError(
-                f"pulse slot {number} sigma is valid only for flat_top"
-            )
+            raise ConfigError(f"pulse slot {number} sigma is valid only for flat_top")
         fields = {
             "freq": freq,
             "length": length,
@@ -435,9 +409,7 @@ class MercatorProgram:
         if not isinstance(g, (Var, int, np.integer)):
             raise ConfigError("pulse-step generator must be an integer or channel Var")
         if (r is None) != (threshold is None):
-            raise ConfigError(
-                "conditional pulse steps require both r and threshold"
-            )
+            raise ConfigError("conditional pulse steps require both r and threshold")
         step = {"type": "pulse", "p": int(p), "g": g}
         if r is not None:
             step.update({"r": r, "threshold": threshold})
@@ -529,17 +501,13 @@ class MercatorProgram:
             fields = self._pulses[slot]
             for name in _PULSE_ORDER:
                 if name in fields:
-                    lines.append(
-                        f"p{slot}_{name}: {_template(fields[name])}"
-                    )
+                    lines.append(f"p{slot}_{name}: {_template(fields[name])}")
         if self._pulses:
             lines.append("")
         for channel, fields in self._readouts:
             rendered_channel = _template(channel)
             for name in ("p", "length", "phase"):
-                lines.append(
-                    f"r{rendered_channel}_{name}: {_template(fields[name])}"
-                )
+                lines.append(f"r{rendered_channel}_{name}: {_template(fields[name])}")
         if self._readouts:
             lines.append("")
         for name in sorted(self._extras):
@@ -608,8 +576,7 @@ class MercatorProgram:
         }
         if self._extras:
             warnings.append(
-                "unverified Mercator extra keys: "
-                + ", ".join(sorted(self._extras))
+                "unverified Mercator extra keys: " + ", ".join(sorted(self._extras))
             )
 
         swept = {
@@ -619,8 +586,7 @@ class MercatorProgram:
         }
         explicit_bindings = set(self._references())
         implicit_delays = sum(
-            step["type"] == "delay_auto" and "t" not in step
-            for step in self._steps
+            step["type"] == "delay_auto" and "t" not in step for step in self._steps
         )
         unresolved_sweeps = swept.difference(explicit_bindings)
         if len(unresolved_sweeps) > implicit_delays:
@@ -672,9 +638,7 @@ class MercatorProgram:
                 samples_per_clock = int(generator["samps_per_clk"])
                 available = int(generator["maxlen"])
             except (KeyError, TypeError, ValueError):
-                warnings.append(
-                    f"generator {channel} has incomplete memory metadata"
-                )
+                warnings.append(f"generator {channel} has incomplete memory metadata")
                 continue
             lengths = _finite_values(
                 fields["length"],
@@ -746,6 +710,15 @@ class MercatorProgram:
             if np.min(clocks) < 1.0:
                 errors.append(
                     f"{label} is shorter than one fabric clock "
+                    f"({float(np.min(clocks)):.3g} clocks)"
+                )
+            elif (
+                label.startswith("p")
+                and label.endswith("_length")
+                and np.min(clocks) < 3.0
+            ):
+                errors.append(
+                    f"{label} is shorter than the three-fabric-clock minimum "
                     f"({float(np.min(clocks)):.3g} clocks)"
                 )
             elif np.min(clocks) < 3.0:

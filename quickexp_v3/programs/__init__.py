@@ -5,11 +5,18 @@ from __future__ import annotations
 from ..backend import register_envelope_terms, register_program_variables
 from .cryoscope import PROGRAM as CRYOSCOPE
 from .flux_step_spectroscopy import PROGRAM as FLUX_STEP_SPECTROSCOPY
+from .resonator_flux_transient import PROGRAM as RESONATOR_FLUX_TRANSIENT
 from .t1_zpa import PROGRAM as T1_ZPA
 from .two_tone_zpa import PROGRAM as TWO_TONE_ZPA
 
 
-PROGRAMS = (TWO_TONE_ZPA, T1_ZPA, FLUX_STEP_SPECTROSCOPY, CRYOSCOPE)
+PROGRAMS = (
+    TWO_TONE_ZPA,
+    T1_ZPA,
+    FLUX_STEP_SPECTROSCOPY,
+    CRYOSCOPE,
+    RESONATOR_FLUX_TRANSIENT,
+)
 
 for _program in PROGRAMS:
     register_program_variables(
@@ -26,6 +33,7 @@ __all__ = [
     "CRYOSCOPE",
     "FLUX_STEP_SPECTROSCOPY",
     "PROGRAMS",
+    "RESONATOR_FLUX_TRANSIENT",
     "T1_ZPA",
     "TWO_TONE_ZPA",
 ]

@@ -97,8 +97,14 @@ Complete these before the first distortion measurement:
    silently command an unconfigured external instrument. If the DC and fast
    paths do not share the fitted Z coordinate, cross-calibrate them and set
    both local-unit overrides; never set only one. If this installation uses a
-   single direct-coupled line, change the program to command total baseline and
-   target levels and revalidate its state/parking behavior.
+   single direct-coupled line, set `PARAMETERS.baseline_on_fast_line=True`
+   instead: every Z command then becomes an absolute level, the step is
+   `baseline_z + commanded_step_z`, the line returns to `baseline_z` for
+   readout and idles there between shots, and the external-baseline latch is
+   not required because there is no second instrument. That mode also requires
+   `first_uncompensated_pass=False`, since a line that can hold the operating
+   point has no bias-tee droop for Eq. F1 to cancel. Revalidate parking
+   behavior: the generator rests at `baseline_z`, not at zero.
 5. Scope the unfiltered Z pulse into a representative 50-ohm load. Record full
    scale, offset, 20–80% edge time, overshoot, and the relationship between
    requested gain and voltage.
@@ -146,6 +152,11 @@ moving windows. Then run:
 python experiments/17a_flux_step_spectroscopy.py
 ```
 
+The launcher as shipped is configured in this installation's own Z-gain units
+against its accepted 06e arch, not in the paper's flux quanta. The Phi0 form
+below remains available for sites that want amplitudes directly comparable to
+the paper, but it is not required to run the measurement.
+
 Paper-faithful settings:
 
 - baseline approximately `-0.127 Phi0`;
@@ -186,6 +197,13 @@ the bias tee can discharge for the 300 us repetition interval. Adaptive mode
 computes the scalar separately for every row. The implementation derives the
 110 ns truncation offset from the configured probe length plus return delay, so
 those user parameters cannot silently disagree with the readout-return model.
+The three persistent Z level-setting pulses use an 8 ns register-write
+duration, which is at least three clocks on both Z fabrics this repository has
+been run against (430.08 MHz needs 6.98 ns; 599.04 MHz needs 5.01 ns). Check
+the Z generator's `f_fabric` before shortening it; the preflight rejects a
+sub-three-clock pulse rather than rounding it. They are
+constant `mode="last"` pulses, so extending them is the correct fix for the
+generator minimum-length requirement; envelope zero-padding does not apply.
 After the dominant IIR is active, set
 `PARAMETERS.first_uncompensated_pass=False`, as in the paper. Verify all four
 timing landmarks on a scope because Mercator delay semantics and pulse-center
@@ -308,6 +326,52 @@ copying 0.74 MHz.
 The reported CZ error and leakage are device-specific follow-on results, not
 acceptance criteria for this calibration. Only begin two-qubit gate validation
 after single-line waveform verification passes.
+
+## Resonator-sensed long-time alternative (`18a`)
+
+`18a_resonator_flux_transient.py` measures the same long-time step response
+without the qubit, by using the readout resonator as a slow flux sensor. Where
+`17a` spends a full qubit spectrum (201 frequencies here) at every observation
+time, `18a` spends one short resonator mini-spectrum, so the same 70-point time
+grid costs minutes instead of hours. Its output feeds the same
+`fit_step_response` and `design_iir_inverse` used by `17b`.
+
+It is an alternative acquisition for the long-time pass only, not a replacement
+for the campaign. Three limits decide whether it applies:
+
+1. **Transduction.** The step must move `f_r` measurably. On the 2026-08 fit of
+   the 5879 MHz resonator (`center 5879.22`, `amplitude 0.825`, `period 0.36`,
+   `peak_bias -0.12`) the `17a` operating point `z=-0.080 -> -0.065` moves the
+   resonator by 159 kHz at 9.3 MHz/z, 64% of the 14.4 MHz/z maximum. The
+   steepest in-domain biases are `z = -0.21, -0.03, +0.15`.
+2. **Monotonicity.** `f_r(z)` is even about its extremum, so a step straddling
+   `peak_bias` is not invertible. The preflight refuses that case rather than
+   fitting it. Both `17a` endpoints sit to the right of `-0.12`, so they pass.
+3. **Cavity bandwidth.** The measured transient is the flux response filtered by
+   the cavity, `tau_r = 2/kappa = 1/(pi*FWHM)`. `18a` masks observation times
+   below `max(5*tau_r, readout_length)` instead of fitting them. With a 2 us
+   readout the readout window usually binds. This method therefore covers
+   multi-microsecond tails; the nanosecond edge stays with `17c`.
+
+Two implementation notes that are easy to get wrong:
+
+- The **accepted `lookups.resonator_vs_flux` record is a different resonator**
+  (6884 MHz) from the one now installed (5879 MHz). `18a` therefore defaults to
+  an explicit calibration and leaves `use_accepted_resonator_flux_fit=False`
+  until that record is replaced. Evaluating the stale record at the `17a`
+  operating point predicts a 2 kHz excursion across an extremum, which is both
+  wrong and unusable.
+- Time constants are bounded to the **measured observation window**.
+  `fit_step_response` otherwise allows up to 30x the longest time, which puts
+  poles the data cannot constrain (hundreds of microseconds from a 100 us
+  campaign) into the designed inverse.
+
+Only `Gamma` (the linewidth) matters as a line-shape parameter. At a fixed probe
+frequency with only `f_r` moving, the response is
+`S21(z) = P + Q/(1 + 2i*(f_probe - f_r(z))/Gamma)`, and the complex `P` and `Q`
+absorb the baseline, coupling, cable delay, amplifier gain and rotation. They are
+fitted from the campaign's own reference sweep, so a gain or phase drift between
+the reference and the transient is removed rather than aliased into flux.
 
 ## Generalizable holdout experiments
 

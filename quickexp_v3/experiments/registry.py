@@ -17,6 +17,7 @@ from .rabi import EXPERIMENT as rabi
 from .rabi_chevron import EXPERIMENT as rabi_chevron
 from .ramsey import EXPERIMENT as ramsey
 from .ramsey_chevron import EXPERIMENT as ramsey_chevron
+from .resonator_flux_transient import EXPERIMENT as resonator_flux_transient
 from .resonator_spectroscopy import EXPERIMENT as resonator_spectroscopy
 from .t1 import EXPERIMENT as t1
 from .t1_zpa import EXPERIMENT as t1_zpa
@@ -41,6 +42,7 @@ EXPERIMENTS: Dict[str, Experiment] = {
         t1_zpa,
         flux_step_spectroscopy,
         cryoscope,
+        resonator_flux_transient,
     )
 }
 
